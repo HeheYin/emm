@@ -118,7 +118,7 @@ class TaskSplitter:
 
     @staticmethod
     def split_tasks(dag, dep_threshold=0.7):
-        """基于依赖强度拆分任务"""
+        """基于依赖强度拆分任务（修复循环依赖问题）"""
         task_ids = sorted(dag.task_nodes.keys())
         dep_strength = TaskSplitter.calc_dependency_strength(dag)
 
@@ -148,17 +148,14 @@ class TaskSplitter:
             # 计算任务组的综合属性
             comp_cost = {}
             for hw in HARDWARE_TYPES:
-                # 任务组执行时间 = 组内任务最大执行时间（并行执行）
                 group_costs = [t.comp_cost.get(hw, float("inf")) for t in group_tasks]
                 if any(c == float("inf") for c in group_costs):
                     comp_cost[hw] = float("inf")
                 else:
                     comp_cost[hw] = max(group_costs)
-            # 硬件标签 = 组内所有任务标签的交集
+
             hardware_tags = list(set.intersection(*[set(t.hardware_tags) for t in group_tasks]))
-            # 截止时间 = 组内最早的截止时间
             deadline = min(t.deadline for t in group_tasks)
-            # 周期 = 组内任务的最大周期（若有周期任务）
             period = max(t.period for t in group_tasks)
 
             # 创建任务组节点
@@ -175,22 +172,49 @@ class TaskSplitter:
                 task_id_map[ti] = new_task_id
             new_task_id += 1
 
-        # 步骤3：添加任务组间的依赖
+        # 步骤3：安全地添加任务组间的依赖（避免循环）
+        edge_added = set()  # 记录已添加的边，避免重复
+
         for i in range(dag.task_num):
             for j in range(dag.task_num):
                 if dag.graph.has_edge(task_ids[i], task_ids[j]):
                     new_from_id = task_id_map[i]
                     new_to_id = task_id_map[j]
-                    if new_from_id != new_to_id and not new_dag.graph.has_edge(new_from_id, new_to_id):
-                        new_dag.add_dependency(new_from_id, new_to_id)
 
-        # 步骤4：构建新DAG的矩阵
+                    # 避免自环和重复边
+                    if new_from_id == new_to_id:
+                        continue  # 跳过自环
+
+                    edge_key = (new_from_id, new_to_id)
+                    if edge_key in edge_added:
+                        continue  # 跳过重复边
+
+                    # 检查添加这条边是否会产生环
+                    new_dag.graph.add_edge(new_from_id, new_to_id)
+                    try:
+                        # 尝试拓扑排序，如果有环会抛出异常
+                        list(nx.topological_sort(new_dag.graph))
+                        edge_added.add(edge_key)  # 无环，保留这条边
+                    except nx.NetworkXUnfeasible:
+                        # 有环，移除这条边
+                        new_dag.graph.remove_edge(new_from_id, new_to_id)
+                        print(f"警告：跳过可能产生循环依赖的边 ({new_from_id} -> {new_to_id})")
+
+        # 步骤4：验证新DAG的无环性
+        try:
+            list(nx.topological_sort(new_dag.graph))
+            print(f"DAG {dag.dag_id} 拆分成功：原任务数 {dag.task_num} → 新任务数 {new_dag.task_num}")
+        except nx.NetworkXUnfeasible:
+            print(f"严重警告：DAG {dag.dag_id} 拆分后仍有循环依赖，创建链式结构")
+            # 回退方案：创建简单的链式结构
+            new_dag.graph.clear_edges()
+            new_task_ids = sorted(new_dag.task_nodes.keys())
+            for i in range(len(new_task_ids) - 1):
+                new_dag.graph.add_edge(new_task_ids[i], new_task_ids[i + 1])
+
+        # 步骤5：构建新DAG的矩阵和计算拆分增益
         new_dag.build_matrices()
-
-        # 步骤5：计算拆分增益
         split_gain = TaskSplitter.evaluate_split_gain(dag, new_dag)
-        print(
-            f"DAG {dag.dag_id} 拆分完成：原任务数 {dag.task_num} → 新任务数 {new_dag.task_num}，拆分增益 {split_gain:.2f}")
 
         return new_dag, split_gain
 

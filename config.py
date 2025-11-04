@@ -65,21 +65,21 @@ GRU_HIDDEN = 64  # GRU隐藏层维度
 LOAD_THRESHOLD = 0.7  # 硬件负载剪枝阈值（仅保留负载<阈值的硬件）
 
 # DRL参数
-BATCH_SIZE = 32  # 减小批次大小
-LEARNING_RATE = 1e-5  # 降低学习率
-GAMMA = 0.95  # 降低折扣因子
+BATCH_SIZE = 16  # 进一步减小批次大小
+LEARNING_RATE = 5e-6  # 进一步降低学习率
+GAMMA = 0.98  # 降低折扣因子
 TAU = 0.01  # 提高软更新系数
-EPS_START = 1.0
-EPS_END = 0.1  # 提高最终探索率
-EPS_DECAY = 200  # 减慢衰减速度
-REPLAY_BUFFER_SIZE = 5000  # 减小回放缓冲区
+EPS_START = 0.9
+EPS_END = 0.05  # 提高最终探索率
+EPS_DECAY = 300  # 减慢衰减速度
+REPLAY_BUFFER_SIZE = 2000  # 减小回放缓冲区
 PRIORITY_ALPHA = 0.6
 
 # ===================== 训练稳定性参数 =====================
 GRAD_CLIP = 0.5  # 梯度裁剪
-REWARD_SCALE = 0.01  # 奖励缩放
-MAX_MAKESPAN = 1000.0  # 最大makespan用于归一化
-MAX_ENERGY = 1000.0  # 最大能耗用于归一化
+REWARD_SCALE = 0.1  # 奖励缩放
+MAX_MAKESPAN = 500.0  # 最大makespan用于归一化
+MAX_ENERGY = 800.0  # 最大能耗用于归一化
 
 # ===================== 任务配置 =====================
 TASK_TYPES = ["工业控制", "边缘AI", "传感器融合"]
@@ -94,7 +94,7 @@ WEIGHTS = {
     "能耗优先": {"makespan": 0.2, "load": 0.2, "energy": 0.4, "reliability": 0.2},
     "均衡模式": {"makespan": 0.3, "load": 0.25, "energy": 0.25, "reliability": 0.2}
 }
-CURRENT_MODE = "均衡模式"
+CURRENT_MODE = "能耗优先"
 
 # ===================== 实验配置 =====================
 DATASET_SIZE = {

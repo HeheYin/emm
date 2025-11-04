@@ -61,13 +61,9 @@ class ResourcePredictor(nn.Module):
         pred_tensor = torch.stack(pred_outs, dim=1)  # (batch_size, pred_steps, input_dim)
         return pred_tensor
 
-class StableMultiObjectiveReward:
-    """稳定的多目标奖励函数"""
 
-    @staticmethod
-    def normalize_value(value, max_value, min_value=0):
-        """归一化数值到[0,1]范围"""
-        return (value - min_value) / (max_value - min_value + 1e-6)
+class ImprovedMultiObjectiveReward:
+    """改进的多目标奖励函数"""
 
     @staticmethod
     def calculate_reward(
@@ -76,60 +72,56 @@ class StableMultiObjectiveReward:
             hardware_load_threshold,
             energy_consumption,
             task_priority,
+            task_deadline,
+            actual_finish_time,
             task_type="传感器融合"
     ):
         """
-        稳定的奖励计算，避免数值问题
+        修复：使用config.py中的动态权重
         """
-        # 1. 归一化各项指标
-        norm_makespan = 1.0 - StableMultiObjectiveReward.normalize_value(
-            current_makespan, MAX_MAKESPAN
-        )
+        # 1. Makespan奖励
+        makespan_reward = 1.0 / (1.0 + current_makespan / 100.0)
 
-        # 2. 负载均衡奖励：使用标准差而不是方差，避免过大值
-        load_std = np.std(load_states)
-        norm_load = 1.0 - load_std  # 标准差越小越好
+        # 2. 截止时间奖励
+        deadline_met = 1.0 if actual_finish_time <= task_deadline else -2.0
+        deadline_reward = deadline_met
 
-        # 3. 能耗奖励
-        norm_energy = 1.0 - StableMultiObjectiveReward.normalize_value(
-            energy_consumption, MAX_ENERGY
-        )
+        # 3. 负载均衡奖励
+        load_balance_reward = 1.0 - np.std(load_states)
 
-        # 4. 可靠性奖励：使用sigmoid函数避免过大惩罚
+        # 4. 能耗奖励
+        energy_reward = 1.0 / (1.0 + energy_consumption / 500.0)
+
+        # 5. 可靠性惩罚
         reliability_penalty = 0.0
         for i, (load, threshold) in enumerate(zip(load_states, hardware_load_threshold)):
             if load > threshold:
                 overload_ratio = (load - threshold) / threshold
-                # 使用sigmoid限制惩罚范围在[0,1]
-                penalty = 1.0 / (1.0 + np.exp(-overload_ratio * 5))
+                penalty = 1.0 / (1.0 + np.exp(-overload_ratio * 3))
                 reliability_penalty += penalty
 
-        norm_reliability = 1.0 - reliability_penalty / len(load_states)
+        reliability_reward = 1.0 - reliability_penalty / len(load_states)
 
-        # 5. 基础权重
-        base_weights = {
-            "工业控制": {"makespan": 0.5, "load": 0.2, "energy": 0.1, "reliability": 0.2},
-            "边缘AI": {"makespan": 0.2, "load": 0.2, "energy": 0.5, "reliability": 0.1},
-            "传感器融合": {"makespan": 0.3, "load": 0.3, "energy": 0.2, "reliability": 0.2}
-        }
-        weights = base_weights.get(task_type, base_weights["传感器融合"])
+        # 6. 修复：使用config中的动态权重，修正键名
+        weights = WEIGHTS[CURRENT_MODE]
 
-        # 6. 优先级加权
-        priority_weight = task_priority / 10.0
+        # 7. 优先级加权
+        priority_weight = 0.5 + task_priority / 20.0
 
-        # 7. 计算综合奖励（所有指标都在[0,1]范围内）
+        # 8. 计算综合奖励 - 修正键名
         total_reward = (
-                               norm_makespan * weights["makespan"] +
-                               norm_load * weights["load"] +
-                               norm_energy * weights["energy"] +
-                               norm_reliability * weights["reliability"]
-                       ) * priority_weight * REWARD_SCALE  # 应用奖励缩放
+                               makespan_reward * weights["makespan"] +
+                               deadline_reward * weights["reliability"] +  # 使用reliability权重
+                               load_balance_reward * weights["load"] +
+                               energy_reward * weights["energy"] +
+                               reliability_reward * weights["reliability"]  # 可靠性奖励也使用reliability权重
+                       ) * priority_weight
 
-        # 8. 确保奖励在合理范围内
+        # 9. 奖励缩放和裁剪
+        total_reward = total_reward * REWARD_SCALE
         total_reward = np.clip(total_reward, -1.0, 1.0)
 
         return float(total_reward)
-
 
 class TaskMigrationStrategy:
     """任务迁移子策略（资源紧急调度）"""
@@ -265,4 +257,4 @@ class StableMODRLScheduler(nn.Module):
 
 
 MODRLScheduler = StableMODRLScheduler
-MultiObjectiveReward = StableMultiObjectiveReward
+MultiObjectiveReward = ImprovedMultiObjectiveReward

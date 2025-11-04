@@ -66,14 +66,54 @@ class EmbeddedDatasetGenerator:
             )
             dag.add_task(task_node)
 
-        # 生成依赖关系（确保无环）
+            # === 修复：改进的依赖生成逻辑 ===
+        task_ids = list(range(task_num))
+
+        # 方法1：确保拓扑顺序 - 只允许小ID指向大ID
         for to_task_id in range(1, task_num):
-            # 每个任务最多依赖3个前驱任务（仅依赖ID更小的任务，避免环）
             max_pred = min(3, to_task_id)
-            pred_num = random.randint(1, max_pred) if to_task_id > 0 else 0
-            pred_ids = random.sample(range(to_task_id), pred_num) if pred_num > 0 else []
-            for pred_id in pred_ids:
-                dag.add_dependency(pred_id, to_task_id)
+            if max_pred > 0:
+                pred_num = random.randint(1, max_pred)
+                # 只从较小的ID中选择前驱
+                available_preds = list(range(to_task_id))
+                if available_preds:
+                    pred_ids = random.sample(available_preds, min(pred_num, len(available_preds)))
+                    for pred_id in pred_ids:
+                        dag.graph.add_edge(pred_id, to_task_id)
+
+        # 方法2：或者使用更严格的层级结构
+        # 将任务分层，只允许上层指向下层
+        # layers = []
+        # remaining_tasks = set(task_ids)
+        # while remaining_tasks:
+        #     # 找到没有入度的任务作为当前层
+        #     current_layer = [t for t in remaining_tasks if dag.graph.in_degree(t) == 0]
+        #     if not current_layer:
+        #         # 如果找不到没有入度的任务，随机选择一个
+        #         current_layer = [random.choice(list(remaining_tasks))]
+        #     layers.append(current_layer)
+        #     remaining_tasks -= set(current_layer)
+        #
+        # # 在相邻层之间添加边
+        # for i in range(len(layers) - 1):
+        #     for to_task in layers[i + 1]:
+        #         # 从上层随机选择1-2个前驱
+        #         max_pred = min(2, len(layers[i]))
+        #         pred_num = random.randint(1, max_pred)
+        #         pred_ids = random.sample(layers[i], pred_num)
+        #         for pred_id in pred_ids:
+        #             dag.graph.add_edge(pred_id, to_task)
+
+        # 验证无环性
+        try:
+            topological_order = list(nx.topological_sort(dag.graph))
+            print(f"DAG {dag_id} 生成成功，拓扑顺序: {topological_order}")
+        except nx.NetworkXUnfeasible:
+            print(f"警告：DAG {dag_id} 仍有循环依赖，创建链式结构")
+            # 回退方案：创建简单的链式结构
+            dag.graph.clear_edges()
+            for i in range(task_num - 1):
+                dag.graph.add_edge(i, i + 1)
 
         # 构建矩阵
         dag.build_matrices()
@@ -81,7 +121,7 @@ class EmbeddedDatasetGenerator:
 
     @staticmethod
     def generate_dataset():
-        """生成完整数据集（包含拆分后DAG）"""
+        """生成完整数据集（使用修复后的拆分）"""
         dataset = {"original": {}, "split": {}}
         for task_type, size in DATASET_SIZE.items():
             original_dags = []
@@ -90,9 +130,15 @@ class EmbeddedDatasetGenerator:
                 # 生成原始DAG
                 original_dag = EmbeddedDatasetGenerator.generate_dag(task_type, dag_id)
                 original_dags.append(original_dag)
-                # 任务拆分
-                split_dag, split_gain = TaskSplitter.split_tasks(original_dag)
-                split_dags.append(split_dag)
+
+                # 使用修复后的任务拆分
+                try:
+                    split_dag, split_gain = TaskSplitter.split_tasks(original_dag)
+                    split_dags.append(split_dag)
+                except Exception as e:
+                    print(f"DAG {dag_id} 拆分失败: {e}，使用原始DAG")
+                    split_dags.append(original_dag)  # 回退到原始DAG
+
             dataset["original"][task_type] = original_dags
             dataset["split"][task_type] = split_dags
 
