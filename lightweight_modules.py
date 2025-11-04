@@ -47,6 +47,7 @@ class LightweightSGC(nn.Module):
         return adj
 
 
+# 替换 lightweight_modules.py 中的 TemporalGRU 类定义为以下代码
 class TemporalGRU(nn.Module):
     """时序GRU（替换原论文LSTM）"""
 
@@ -67,10 +68,15 @@ class TemporalGRU(nn.Module):
         return: 时序嵌入特征 (batch_size, task_num, hidden_dim)
         """
         batch_size, task_num = seq_order.shape
+        # 检查seq_order中的索引是否超出范围，并进行修正
+        seq_order = torch.clamp(seq_order, 0, task_num - 1)
+
         # 按优先级顺序重排特征
         ordered_x = torch.zeros_like(x, device=x.device)
         for b in range(batch_size):
-            ordered_x[b] = x[b, seq_order[b]]
+            # 使用高级索引正确重排
+            ordered_x[b] = x[b][seq_order[b]]
+
         # GRU前向传播
         out, _ = self.gru(ordered_x)
         # 层归一化
@@ -78,7 +84,9 @@ class TemporalGRU(nn.Module):
         # 恢复原顺序
         reversed_x = torch.zeros_like(out, device=x.device)
         for b in range(batch_size):
-            reversed_x[b, seq_order[b]] = out[b]
+            # 使用 inverse indexing 恢复原顺序
+            reversed_x[b][seq_order[b]] = out[b]
+
         return reversed_x
 
 
@@ -105,16 +113,15 @@ class LightweightSetTransformer(nn.Module):
         load_states: 硬件负载状态 (batch_size, hardware_num) → 0-1
         return: 聚合后的集群特征 (batch_size, out_dim)
         """
-        batch_size = x.shape[0]
         # 注意力剪枝：仅保留负载<阈值的硬件
-        mask = (load_states >= LOAD_THRESHOLD).unsqueeze(1)  # (batch_size, 1, hardware_num)
+        mask = (load_states >= LOAD_THRESHOLD)  # (batch_size, hardware_num) - 移除了unsqueeze(1)
 
         # 自注意力聚合
         attn_out, _ = self.attention(
             query=x,
             key=x,
             value=x,
-            key_padding_mask=mask
+            key_padding_mask=mask  # 直接使用2D mask
         )
 
         # 全局池化（max pooling）

@@ -31,12 +31,19 @@ class ResourcePredictor(nn.Module):
         # 预测未来状态（用最后一个时间步的隐藏状态预测所有未来步）
         hidden = hidden.squeeze(0)  # (batch_size, hidden_dim)
         pred_outs = []
+
+        # 初始化隐藏状态和细胞状态
+        hx = hidden.unsqueeze(0)  # (1, batch_size, hidden_dim)
+        cx = torch.zeros_like(hx)  # (1, batch_size, hidden_dim)
+
         for _ in range(self.pred_steps):
-            pred = self.predictor(hidden)
+            # 预测当前时间步
+            pred = self.predictor(hidden)  # (batch_size, input_dim)
             pred_outs.append(pred)
             # 用预测结果更新隐藏状态（自回归）
             pred_expand = pred.unsqueeze(1)  # (batch_size, 1, input_dim)
-            _, (hidden, _) = self.lstm(pred_expand, (hidden.unsqueeze(0), torch.zeros_like(hidden.unsqueeze(0))))
+            _, (hx, cx) = self.lstm(pred_expand, (hx, cx))
+            hidden = hx.squeeze(0)  # 更新hidden用于下一次预测
 
         return torch.stack(pred_outs, dim=1)  # (batch_size, pred_steps, input_dim)
 
@@ -145,6 +152,7 @@ class TaskMigrationStrategy:
 class MODRLScheduler(nn.Module):
     """嵌入式轻量化MODRL调度器"""
 
+    # 修改 MODRLScheduler.__init__ 方法中的 q_network 和 target_q_network 定义
     def __init__(self, task_feat_dim, adj_dim, hardware_feat_dim):
         super().__init__()
         # 时空嵌入层
@@ -154,8 +162,10 @@ class MODRLScheduler(nn.Module):
         # 资源预测子网络
         self.resource_predictor = ResourcePredictor()
         # 调度决策网络（D3QN）
+        # 修正输入维度：task_embed(EMBED_DIM) + global_dag_embed(EMBED_DIM) +
+        # hardware_embed(EMBED_DIM) + pred_resource(4) = 64 + 64 + 64 + 4 = 196
         self.q_network = nn.Sequential(
-            nn.Linear(EMBED_DIM * 2 + hardware_feat_dim, 128),
+            nn.Linear(EMBED_DIM * 3 + 4, 128),  # 修改此处
             nn.ReLU(),
             nn.LayerNorm(128),
             nn.Linear(128, 64),
@@ -164,7 +174,7 @@ class MODRLScheduler(nn.Module):
         )
         # 目标网络
         self.target_q_network = nn.Sequential(
-            nn.Linear(EMBED_DIM * 2 + hardware_feat_dim, 128),
+            nn.Linear(EMBED_DIM * 3 + 4, 128),  # 修改此处
             nn.ReLU(),
             nn.LayerNorm(128),
             nn.Linear(128, 64),

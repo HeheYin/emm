@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import random
+import networkx as nx
 from config import *
 from task_model import EmbeddedDAG, EmbeddedTaskNode, TaskSplitter
 from layered_optimization import MODRLScheduler, MultiObjectiveReward
@@ -11,17 +12,16 @@ class EmbeddedDatasetGenerator:
     """嵌入式任务数据集生成器"""
 
     @staticmethod
-    def generate_task_comp_cost(task_type, hw_type):
-        """生成任务在指定硬件上的执行时间（ms）"""
+    def generate_task_comp_cost(task_type, hw):
+        """生成任务在指定硬件上的计算开销"""
         base_cost = {
-            "工业控制": {"CPU": 10, "GPU": 8, "FPGA": 5, "MCU": 15},
-            "边缘AI": {"CPU": 50, "GPU": 10, "FPGA": 15, "MCU": float("inf")},  # MCU不支持AI任务
-            "传感器融合": {"CPU": 20, "GPU": 12, "FPGA": 8, "MCU": 25}
-        }[task_type][hw_type]
-        if base_cost == float("inf"):
-            return float("inf")
-        # 加入随机波动（±30%）
-        return base_cost * random.uniform(0.7, 1.3)
+            "工业控制": {"Cortex-A78": 20, "Mali-G78": 15, "NPU": 25, "DSP": 18},
+            "边缘AI": {"Cortex-A78": 50, "Mali-G78": 30, "NPU": 20, "DSP": 40},
+            "传感器融合": {"Cortex-A78": 30, "Mali-G78": 25, "NPU": 35, "DSP": 22}
+        }[task_type][hw]
+
+        # 添加随机扰动
+        return base_cost * random.uniform(0.8, 1.2)
 
     @staticmethod
     def generate_hardware_tags(task_type):
