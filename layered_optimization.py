@@ -48,15 +48,63 @@ class ResourcePredictor(nn.Module):
         return torch.stack(pred_outs, dim=1)  # (batch_size, pred_steps, input_dim)
 
 
+
+# layered_optimization.py 中的 MultiObjectiveReward 类修改
 class MultiObjectiveReward:
     """多目标奖励函数（Makespan+负载+能耗+可靠性）"""
+
+    @staticmethod
+    def get_adaptive_weights(task_type, current_load_states, hardware_types):
+        """
+        根据任务类型和当前硬件状态动态调整权重
+        task_type: 任务类型
+        current_load_states: 当前硬件负载状态
+        hardware_types: 硬件类型列表
+        return: 动态权重字典
+        """
+        # 基础权重配置
+        base_weights = {
+            "工业控制": {"makespan": 0.5, "load": 0.1, "energy": 0.1, "reliability": 0.3},
+            "边缘AI": {"makespan": 0.2, "load": 0.2, "energy": 0.4, "reliability": 0.2},
+            "传感器融合": {"makespan": 0.3, "load": 0.2, "energy": 0.3, "reliability": 0.2}
+        }
+
+        # 根据任务类型获取基础权重
+        weights = base_weights.get(task_type, base_weights["传感器融合"]).copy()
+
+        # 根据硬件负载状态调整权重
+        avg_load = np.mean(current_load_states)
+        if avg_load > 0.8:  # 高负载时更关注可靠性
+            weights["reliability"] += 0.1
+            weights["makespan"] -= 0.05
+            weights["energy"] -= 0.05
+
+        # 根据硬件类型调整能耗权重
+        # DSP通常用于低功耗场景，NPU用于高性能场景
+        dsp_load = current_load_states[hardware_types.index("DSP")] if "DSP" in hardware_types else 0
+        npu_load = current_load_states[hardware_types.index("NPU")] if "NPU" in hardware_types else 0
+
+        if dsp_load > 0.7:  # DSP高负载时更关注能耗
+            weights["energy"] += 0.1
+            weights["makespan"] -= 0.05
+
+        if npu_load > 0.8:  # NPU高负载时更关注可靠性
+            weights["reliability"] += 0.1
+            weights["energy"] -= 0.05
+
+        # 归一化权重
+        total = sum(weights.values())
+        for key in weights:
+            weights[key] /= total
+
+        return weights
 
     @staticmethod
     def calculate_reward(
             current_makespan, last_makespan,
             load_states, hardware_load_threshold,
             energy_consumption, last_energy,
-            task_priority
+            task_priority, task_type="传感器融合"
     ):
         """
         current_makespan: 当前总执行时间
@@ -65,26 +113,46 @@ class MultiObjectiveReward:
         energy_consumption: 当前总能耗
         last_energy: 上一轮总能耗
         task_priority: 当前任务优先级
+        task_type: 任务类型，用于动态调整权重
         return: 综合奖励值
         """
-        weights = WEIGHTS[CURRENT_MODE]
+        # 获取动态权重
+        weights = MultiObjectiveReward.get_adaptive_weights(task_type, load_states, HARDWARE_TYPES)
 
-        # 1. Makespan奖励：减少量越大奖励越高
-        makespan_reward = -(current_makespan - last_makespan) / (last_makespan + 1e-6)
+        # 1. Makespan奖励：使用相对改进而不是绝对差值
+        if last_makespan > 1e-6:  # 避免除零错误
+            makespan_improvement = (last_makespan - current_makespan) / last_makespan
+        else:
+            # 第一次计算时，使用绝对值的负数作为惩罚
+            makespan_improvement = -current_makespan / 100.0  # 标准化
+
+        makespan_reward = makespan_improvement
 
         # 2. 负载均衡奖励：负载方差越小奖励越高
         load_var = np.var(load_states)
         load_reward = -load_var
 
-        # 3. 能耗奖励：能耗增量越小奖励越高
-        energy_increment = energy_consumption - last_energy
-        energy_reward = -energy_increment / (last_energy + 1e-6)
+        # 3. 能耗奖励：使用相对改进而不是绝对差值
+        if last_energy > 1e-6:  # 避免除零错误
+            energy_improvement = (last_energy - energy_consumption) / last_energy
+        else:
+            # 第一次计算时，使用绝对值的负数作为惩罚
+            energy_improvement = -energy_consumption / 100.0  # 标准化
 
-        # 4. 可靠性奖励：超过负载阈值惩罚
+        energy_reward = energy_improvement
+
+        # 4. 可靠性奖励：超过负载阈值惩罚，结合硬件特性
         reliability_reward = 0.0
-        for load, threshold in zip(load_states, hardware_load_threshold):
+        for i, (load, threshold) in enumerate(zip(load_states, hardware_load_threshold)):
+            hw_type = HARDWARE_TYPES[i]
             if load > threshold:
-                reliability_reward -= (load - threshold)
+                # 根据硬件类型调整惩罚系数
+                penalty_factor = 1.0
+                if hw_type == "DSP":  # DSP对过载更敏感
+                    penalty_factor = 1.5
+                elif hw_type == "NPU":  # NPU对过载容忍度较高
+                    penalty_factor = 0.8
+                reliability_reward -= (load - threshold) * penalty_factor
 
         # 5. 任务优先级加权
         priority_weight = (task_priority / 10.0)  # 1-10 → 0.1-1.0
@@ -99,6 +167,59 @@ class MultiObjectiveReward:
 
         return total_reward
 
+
+
+# class MultiObjectiveReward:
+#     """多目标奖励函数（Makespan+负载+能耗+可靠性）"""
+#
+#     @staticmethod
+#     def calculate_reward(
+#             current_makespan, last_makespan,
+#             load_states, hardware_load_threshold,
+#             energy_consumption, last_energy,
+#             task_priority
+#     ):
+#         """
+#         current_makespan: 当前总执行时间
+#         last_makespan: 上一轮总执行时间
+#         load_states: 各硬件负载 (hardware_num,)
+#         energy_consumption: 当前总能耗
+#         last_energy: 上一轮总能耗
+#         task_priority: 当前任务优先级
+#         return: 综合奖励值
+#         """
+#         weights = WEIGHTS[CURRENT_MODE]
+#
+#         # 1. Makespan奖励：减少量越大奖励越高
+#         makespan_reward = -(current_makespan - last_makespan) / (last_makespan + 1e-6)
+#
+#         # 2. 负载均衡奖励：负载方差越小奖励越高
+#         load_var = np.var(load_states)
+#         load_reward = -load_var
+#
+#         # 3. 能耗奖励：能耗增量越小奖励越高
+#         energy_increment = energy_consumption - last_energy
+#         energy_reward = -energy_increment / (last_energy + 1e-6)
+#
+#         # 4. 可靠性奖励：超过负载阈值惩罚
+#         reliability_reward = 0.0
+#         for load, threshold in zip(load_states, hardware_load_threshold):
+#             if load > threshold:
+#                 reliability_reward -= (load - threshold)
+#
+#         # 5. 任务优先级加权
+#         priority_weight = (task_priority / 10.0)  # 1-10 → 0.1-1.0
+#
+#         # 综合奖励
+#         total_reward = (
+#                                makespan_reward * weights["makespan"] +
+#                                load_reward * weights["load"] +
+#                                energy_reward * weights["energy"] +
+#                                reliability_reward * weights["reliability"]
+#                        ) * priority_weight
+#
+#         return total_reward
+#
 
 class TaskMigrationStrategy:
     """任务迁移子策略（资源紧急调度）"""

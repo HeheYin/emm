@@ -41,7 +41,7 @@ def main():
 
     # 3. 初始化MODRL调度器
     print("===== 初始化MODRL调度器 =====")
-    task_feat_dim = HARDWARE_NUM  # 任务特征维度（计算开销向量）
+    task_feat_dim = HARDWARE_NUM + HARDWARE_NUM + 2  # 计算开销 + 能耗 + 优先级 + 截止时间
     adj_dim = MAX_TASK_NUM  # 邻接矩阵维度
     hardware_feat_dim = 4  # 硬件特征维度（算力、内存、能耗系数、负载阈值）
     modrl_scheduler = MODRLScheduler(task_feat_dim, adj_dim, hardware_feat_dim).to(DEVICE)
@@ -74,17 +74,48 @@ def main():
         deadline_satisfied = 0
         total_tasks = 0
 
+        # 添加episode级别的统计信息
+        episode_makespan_history = []  # 记录该episode中每个DAG的makespan
+        episode_energy_history = []  # 记录该episode中每个DAG的能耗
+
         # 随机选择一个DAG批次
         task_type = random.choice(TASK_TYPES)
         dag_batch = random.sample(dataset["split"][task_type], 5)  # 每次训练5个DAG
 
         for dag in dag_batch:
-            # 提取任务特征
-            task_feat = torch.tensor(dag.comp_matrix, dtype=torch.float32).unsqueeze(0).to(DEVICE)
-            adj = torch.tensor(nx.to_numpy_array(dag.graph), dtype=torch.float32).unsqueeze(0).to(DEVICE)
-            # 替换原来的seq_order生成代码
-            # 在 main.py 中，替换原来的 seq_order 生成代码
+            # 提取任务特征 - 修改部分：构建更丰富的任务特征
             task_ids = sorted(dag.task_nodes.keys())
+            task_num = len(task_ids)
+
+            # 构建任务特征矩阵 (task_num, feature_dim)
+            # 特征包括：计算开销(hardware_num) + 能耗(hardware_num) + 优先级(1) + 截止时间(1) = hardware_num*2 + 2
+            task_feat_dim = HARDWARE_NUM + HARDWARE_NUM + 2  # 与 ExperimentEvaluator.evaluate_modrl 保持一致
+            task_feat = np.zeros((task_num, task_feat_dim))
+
+            for i, task_id in enumerate(task_ids):
+                task = dag.task_nodes[task_id]
+                task_idx = i
+
+                # 计算开销特征
+                for j, hw in enumerate(HARDWARE_TYPES):
+                    task_feat[task_idx, j] = dag.comp_matrix[task_idx, j]
+
+                # 能耗特征
+                for j, hw in enumerate(HARDWARE_TYPES):
+                    task_feat[task_idx, j + HARDWARE_NUM] = dag.energy_matrix[task_idx, j]
+
+                # 优先级特征
+                task_feat[task_idx, -2] = task.priority
+
+                # 截止时间特征
+                task_feat[task_idx, -1] = task.deadline
+
+            task_feat = torch.tensor(task_feat, dtype=torch.float32).unsqueeze(0).to(DEVICE)
+
+
+            adj = torch.tensor(nx.to_numpy_array(dag.graph), dtype=torch.float32).unsqueeze(0).to(DEVICE)
+
+            # 替换原来的seq_order生成代码
             priorities = [dag.task_nodes[tid].priority for tid in task_ids]
             # 创建按照优先级排序的索引
             sorted_indices = sorted(range(len(priorities)), key=lambda i: priorities[i], reverse=True)
@@ -103,23 +134,39 @@ def main():
 
             # MODRL调度决策
             q_values = modrl_scheduler(task_feat, adj, seq_order, hardware_feat, load_states, history_resource)
-            action = torch.argmax(q_values, dim=-1).cpu().numpy()  # 选择Q值最高的硬件
+            action = torch.argmax(q_values, dim=-1).cpu().numpy()[0]  # 取出 batch 维度的第一个样本
 
             # 执行调度并计算奖励
-            current_makespan, task_energy = execute_scheduling(dag, action[0], current_load)
+            current_makespan, task_energy = execute_scheduling(dag, action, current_load)
             total_energy += task_energy
 
             # 计算负载状态
             load_states_np = current_load.copy()
             hardware_thresholds = [EMBEDDED_HARDWARES[hw]["负载阈值"] for hw in HARDWARE_TYPES]
 
+            # 使用episode历史计算更稳定的奖励
+            if len(episode_makespan_history) > 0:
+                last_makespan_avg = np.mean(episode_makespan_history[-5:])  # 使用最近5个DAG的平均值
+            else:
+                last_makespan_avg = last_makespan  # 使用episode初始值
+
+            if len(episode_energy_history) > 0:
+                last_energy_avg = np.mean(episode_energy_history[-5:])  # 使用最近5个DAG的平均值
+            else:
+                last_energy_avg = last_energy  # 使用episode初始值
+
             # 计算多目标奖励
             reward = MultiObjectiveReward.calculate_reward(
-                current_makespan, last_makespan,
+                current_makespan, last_makespan_avg,
                 load_states_np, hardware_thresholds,
-                total_energy, last_energy,
-                dag.task_nodes[0].priority  # 用第一个任务的优先级代表DAG优先级
+                total_energy, last_energy_avg,
+                dag.task_nodes[0].priority,  # 任务优先级
+                dag.task_type  # 添加任务类型参数
             )
+
+            # 更新episode历史
+            episode_makespan_history.append(current_makespan)
+            episode_energy_history.append(total_energy)
 
             # 检查截止时间满足情况
             if current_makespan <= dag.task_nodes[0].deadline:
@@ -178,24 +225,46 @@ def main():
     print("实验完成！")
 
 
-def execute_scheduling(dag, action, current_load):
+# main.py 中的 execute_scheduling 函数需要修改
+def execute_scheduling(dag, actions, current_load):
     """执行调度并返回makespan和能耗"""
     task_ids = sorted(dag.task_nodes.keys())
     makespan = 0.0
     total_energy = 0.0
+    hw_finish_times = np.zeros(HARDWARE_NUM)  # 记录每个硬件的完成时间
 
-    for task_id in task_ids:
-        task_idx = task_ids.index(task_id)
-        hw_idx = action[task_idx] if isinstance(action, np.ndarray) else action
+    # 修改部分：确保 actions 是一个数组，而不是单个值
+    if isinstance(actions, int):
+        actions = [actions] * len(task_ids)
+    elif isinstance(actions, np.ndarray) and actions.ndim == 0:
+        actions = [actions.item()] * len(task_ids)
+    elif isinstance(actions, torch.Tensor) and actions.dim() == 0:
+        actions = [actions.item()] * len(task_ids)
+
+    for i, task_id in enumerate(task_ids):
+        task_idx = i
+        hw_idx = actions[i]
         exec_time = dag.comp_matrix[task_idx, hw_idx]
         energy = dag.energy_matrix[task_idx, hw_idx]
 
+        # 更新硬件完成时间（考虑任务依赖）
+        start_time = float(hw_finish_times[hw_idx])  # 确保转换为标量
+        # 考虑前驱任务的完成时间
+        for pred_id in dag.graph.predecessors(task_id):
+            pred_idx = task_ids.index(pred_id)
+            # 简化处理：假设在同一硬件上执行
+            start_time = max(start_time, float(hw_finish_times[hw_idx]))  # 确保类型一致
+
+        finish_time = start_time + exec_time
+        hw_finish_times[hw_idx] = finish_time
+
         # 更新负载
-        current_load[hw_idx] = min(current_load[hw_idx] + exec_time / 100, 1.0)  # 简单负载模型
-        makespan += exec_time
+        current_load[hw_idx] = min(current_load[hw_idx] + exec_time / 100, 1.0)
+        makespan = max(makespan, finish_time)
         total_energy += energy
 
     return makespan, total_energy
+
 
 
 def schedule_dynamic_task(task, current_load):
