@@ -65,14 +65,21 @@ GRU_HIDDEN = 64  # GRU隐藏层维度
 LOAD_THRESHOLD = 0.7  # 硬件负载剪枝阈值（仅保留负载<阈值的硬件）
 
 # DRL参数
-BATCH_SIZE = 64
-LEARNING_RATE = 1e-4
-GAMMA = 0.99  # 折扣因子
-TAU = 0.005  # 软更新系数
+BATCH_SIZE = 32  # 减小批次大小
+LEARNING_RATE = 1e-5  # 降低学习率
+GAMMA = 0.95  # 降低折扣因子
+TAU = 0.01  # 提高软更新系数
 EPS_START = 1.0
-EPS_DECAY = 5e-7
-REPLAY_BUFFER_SIZE = 10000
-PRIORITY_ALPHA = 0.6  # 优先经验回放参数
+EPS_END = 0.1  # 提高最终探索率
+EPS_DECAY = 200  # 减慢衰减速度
+REPLAY_BUFFER_SIZE = 5000  # 减小回放缓冲区
+PRIORITY_ALPHA = 0.6
+
+# ===================== 训练稳定性参数 =====================
+GRAD_CLIP = 0.5  # 梯度裁剪
+REWARD_SCALE = 0.01  # 奖励缩放
+MAX_MAKESPAN = 1000.0  # 最大makespan用于归一化
+MAX_ENERGY = 1000.0  # 最大能耗用于归一化
 
 # ===================== 任务配置 =====================
 TASK_TYPES = ["工业控制", "边缘AI", "传感器融合"]
@@ -96,14 +103,18 @@ DATASET_SIZE = {
     "传感器融合": 150
 }
 DYNAMIC_ARRIVAL_RATE = {"高峰": 0.1, "平峰": 0.02}  # 任务到达率（个/ms）
-BASELINE_ALGORITHMS = ["HEFT", "CPOP", "ADTS", "RM", "EDF", "LLF"]
-
-# ===================== 硬件实测配置 =====================
-HARDWARE_PLATFORM = "JetsonNano+STM32+FPGA"
-POWER_METER_PATH = "/dev/power_meter"  # 功率计设备路径（模拟）
-TEMPERATURE_SENSOR_PATH = "/dev/temp_sensor"  # 温度传感器路径（模拟）
+BASELINE_ALGORITHMS = ["HEFT", "RM", "EDF"]  # 简化基线算法
 
 # ===================== 设备配置 =====================
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# 嵌入式设备强制使用CPU时注释上一行，启用下一行
-# DEVICE = torch.device("cpu")
+# BASELINE_ALGORITHMS = ["HEFT", "CPOP", "ADTS", "RM", "EDF", "LLF"]
+#
+# # ===================== 硬件实测配置 =====================
+# HARDWARE_PLATFORM = "JetsonNano+STM32+FPGA"
+# POWER_METER_PATH = "/dev/power_meter"  # 功率计设备路径（模拟）
+# TEMPERATURE_SENSOR_PATH = "/dev/temp_sensor"  # 温度传感器路径（模拟）
+#
+# # ===================== 设备配置 =====================
+# DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# # 嵌入式设备强制使用CPU时注释上一行，启用下一行
+# # DEVICE = torch.device("cpu")
