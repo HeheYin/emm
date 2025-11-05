@@ -38,7 +38,7 @@ class StableEpsilonGreedyStrategy:
 
 
 def prepare_dag_input(dag):
-    """准备DAG的输入特征"""
+    """修正的状态特征准备"""
     task_ids = sorted(dag.task_nodes.keys())
     task_num = len(task_ids)
 
@@ -50,15 +50,15 @@ def prepare_dag_input(dag):
 
         # 计算开销特征
         for j in range(HARDWARE_NUM):
-            task_feat[i, j] = dag.comp_matrix[i, j] / 100.0  # 归一化
+            task_feat[i, j] = dag.comp_matrix[i, j] / 100.0
 
         # 能耗特征
         for j in range(HARDWARE_NUM):
-            task_feat[i, j + HARDWARE_NUM] = dag.energy_matrix[i, j] / 100.0  # 归一化
+            task_feat[i, j + HARDWARE_NUM] = dag.energy_matrix[i, j] / 100.0
 
         # 优先级和截止时间特征
-        task_feat[i, -2] = task.priority / 10.0  # 归一化到[0,1]
-        task_feat[i, -1] = task.deadline / 1000.0  # 归一化
+        task_feat[i, -2] = task.priority / 10.0
+        task_feat[i, -1] = task.deadline / 1000.0
 
     task_feat = torch.tensor(task_feat, dtype=torch.float32).unsqueeze(0).to(DEVICE)
     adj = torch.tensor(nx.to_numpy_array(dag.graph), dtype=torch.float32).unsqueeze(0).to(DEVICE)
@@ -68,20 +68,25 @@ def prepare_dag_input(dag):
     sorted_indices = sorted(range(len(priorities)), key=lambda i: priorities[i], reverse=True)
     seq_order = torch.tensor(sorted_indices, dtype=torch.long).unsqueeze(0).to(DEVICE)
 
-    # 硬件特征
+    # 修正硬件特征 - 确保正确维度
     hardware_feat = []
     for hw in HARDWARE_TYPES:
         hw_info = EMBEDDED_HARDWARES[hw]
         hardware_feat.append([
-            hw_info["算力"] / 100.0,  # 归一化
-            hw_info["内存"] / 10.0,  # 归一化
+            hw_info["算力"] / 100.0,
+            hw_info["内存"] / 10.0,
             hw_info["能耗系数"],
             hw_info["负载阈值"]
         ])
+
+    # 修正：硬件特征应该是 (batch_size, hardware_num, feature_dim)
     hardware_feat = torch.tensor(hardware_feat, dtype=torch.float32).unsqueeze(0).to(DEVICE)
 
-    # 负载状态和历史资源数据
-    load_states = torch.tensor(np.zeros(HARDWARE_NUM), dtype=torch.float32).unsqueeze(0).to(DEVICE)
+    # 修正：负载状态应该是 (batch_size, hardware_num)
+    current_load = np.random.uniform(0.1, 0.3, size=HARDWARE_NUM)
+    load_states = torch.tensor(current_load, dtype=torch.float32).unsqueeze(0).to(DEVICE)
+
+    # 历史资源数据
     history_resource = torch.randn(1, 10, 4, dtype=torch.float32).to(DEVICE) * 0.1
 
     return task_feat, adj, seq_order, hardware_feat, load_states, history_resource
@@ -102,8 +107,6 @@ def main():
     # 1. 数据集生成
     print("===== 生成嵌入式任务数据集 =====")
     dataset = EmbeddedDatasetGenerator.generate_dataset()
-
-
 
     # 3. 初始化MODRL调度器
     print("===== 初始化MODRL调度器 =====")
@@ -202,21 +205,26 @@ def main():
 
         # 历史资源数据
         history_resource = torch.randn(1, 10, 4, dtype=torch.float32).to(DEVICE) * 0.1  # 减小噪声
+        # 为每个DAG创建独立的硬件使用计数
+        episode_hw_usage_count = [0] * HARDWARE_NUM
 
         # MODRL调度决策
         q_values = modrl_scheduler(task_feat, adj, seq_order, hardware_feat, load_states, history_resource)
 
         # 对每个任务应用ε-greedy策略
         actions = []
-        current_time = 0.0  # 简化处理
+        current_time = 0.0
+
         for task_idx in range(len(task_ids)):
             task = dag.task_nodes[task_ids[task_idx]]
             action = improved_select_action(
-                q_values[0, task_idx],
+                q_values[0, task_idx],  # 每个任务对应的Q值
                 epsilon,
-                dag.comp_matrix[task_idx],
+                dag.comp_matrix[task_idx],  # 该任务在各硬件上的计算成本
                 task.deadline,
-                current_time
+                current_time,
+                task_idx,  # 传递任务索引
+                episode_hw_usage_count  # 传递episode特定的使用计数
             )
             actions.append(action)
 
@@ -310,101 +318,135 @@ def main():
 
 
 def calculate_simple_reward(makespan, load_states, hardware_thresholds, energy, priority, deadline_satisfaction):
-    """修正的奖励计算，加强负载均衡"""
-    # 归一化各项指标
+    """简化奖励函数，专注于核心目标"""
+
+    # 1. Makespan奖励（最重要）
     makespan_reward = 1.0 / (1.0 + makespan / 100.0)
 
-    # 加强负载均衡奖励
-    load_imbalance = np.std(load_states)  # 使用标准差衡量不均衡程度
-    load_reward = 1.0 / (1.0 + load_imbalance * 10)  # 放大负载均衡的影响
+    # 2. 负载均衡奖励（促进并行）
+    load_balance = 1.0 - np.std(load_states)
 
-    energy_reward = 1.0 / (1.0 + energy / 500.0)
+    # 3. 截止时间奖励
+    deadline_reward = deadline_satisfaction
 
-    # 可靠性惩罚
-    reliability_penalty = 0.0
-    for load, threshold in zip(load_states, hardware_thresholds):
-        if load > threshold:
-            reliability_penalty += (load - threshold) / threshold
-
-    reliability_reward = 1.0 - min(reliability_penalty / len(load_states), 1.0)
-
-    # 使用config中的动态权重
-    weights = WEIGHTS[CURRENT_MODE]
-
-    # 综合奖励 - 加强负载均衡权重
+    # 4. 综合奖励（大幅简化）
     total_reward = (
-                           makespan_reward * weights["makespan"] +
-                           deadline_satisfaction * weights["reliability"] +
-                           load_reward * (weights["load"] + 0.2) +  # 增加负载均衡权重
-                           energy_reward * weights["energy"] +
-                           reliability_reward * weights["reliability"]
-                   ) * (0.5 + priority / 20.0)
+            makespan_reward * 0.5 +
+            load_balance * 0.3 +
+            deadline_reward * 0.2
+    )
 
     return float(total_reward)
 
 
-def improved_select_action(q_values, epsilon, comp_costs, task_deadline, current_time):
-    """改进的动作选择，考虑负载均衡和并行执行"""
+def improved_select_action(q_values, epsilon, comp_costs, task_deadline, current_time, task_idx=None,
+                           hw_usage_count=None):
+    """改进的动作选择，强制负载均衡和并行化"""
+
+    # 获取有效硬件（计算成本不为无穷大）
     valid_actions = [i for i, cost in enumerate(comp_costs) if cost != float('inf')]
     if not valid_actions:
         return random.randint(0, HARDWARE_NUM - 1)
 
-    # 全局硬件使用计数
-    if not hasattr(improved_select_action, 'hw_usage_count'):
-        improved_select_action.hw_usage_count = [0] * HARDWARE_NUM
-    usage_count = improved_select_action.hw_usage_count
+    # 如果未提供硬件使用计数，创建新的（每个DAG独立）
+    if hw_usage_count is None:
+        hw_usage_count = [0] * HARDWARE_NUM
 
-    # 探索阶段 - 改进的负载均衡策略
+    # 如果是DAG的第一个任务，重置硬件使用计数（确保每个DAG独立）
+    if task_idx == 0:
+        hw_usage_count = [0] * HARDWARE_NUM
+
+    # 计算当前负载状态（基于使用计数）
+    total_usage = sum(hw_usage_count) if sum(hw_usage_count) > 0 else 1
+    hw_usage_ratio = [count / total_usage for count in hw_usage_count]
+
+    # 探索阶段 - 强制负载均衡和并行化
     if random.random() < epsilon:
-        # 计算每个硬件的相对使用率
-        total_usage = sum(usage_count) if sum(usage_count) > 0 else 1
-        hw_usage_ratio = [count / total_usage for count in usage_count]
+        # 并行化优先策略：选择使用率最低的硬件
+        min_usage = float('inf')
+        best_hws = []
 
-        # 选择使用率最低的有效硬件
+        for hw in valid_actions:
+            # 强烈偏好使用率低的硬件
+            usage_score = hw_usage_ratio[hw]
+
+            if usage_score < min_usage:
+                min_usage = usage_score
+                best_hws = [hw]
+            elif usage_score == min_usage:
+                best_hws.append(hw)
+
+        # 如果有多个相同使用率的硬件，随机选择
+        if best_hws:
+            best_hw = random.choice(best_hws)
+        else:
+            best_hw = random.choice(valid_actions)
+
+        # 更新使用计数
+        hw_usage_count[best_hw] += 1
+        return best_hw
+
+    # 利用阶段 - 结合Q值、负载均衡和并行化约束
+    q_values_np = q_values.detach().cpu().numpy()
+
+    # 创建并行化感知的Q值调整
+    masked_q_values = np.full(HARDWARE_NUM, -1e6)
+
+    for hw in valid_actions:
+        # 1. 基础Q值
+        base_q = q_values_np[hw]
+
+        # 2. 负载均衡因子（强烈惩罚过载硬件）
+        load_balance_factor = 1.5 - (hw_usage_ratio[hw] * 2.0)  # 使用率越高，惩罚越大
+
+        # 3. 并行化奖励（鼓励分散到不同硬件）
+        parallelization_bonus = 0.0
+        if hw_usage_ratio[hw] < 0.3:  # 如果硬件使用率低于30%，给予奖励
+            parallelization_bonus = 0.8 * (0.3 - hw_usage_ratio[hw])
+
+        # 4. 紧急任务处理
+        time_remaining = task_deadline - current_time
+        avg_comp_cost = np.mean([comp_costs[i] for i in valid_actions])
+        is_urgent = time_remaining < avg_comp_cost * 2
+
+        if is_urgent:
+            # 紧急任务：优先选择执行时间最短的硬件
+            time_factor = 1.0 / (1.0 + comp_costs[hw] / 10.0)
+            adjusted_q_value = base_q * (1.0 + time_factor * 0.6)  # 时间因素占60%权重
+        else:
+            # 正常任务：综合考虑Q值、负载均衡和并行化
+            adjusted_q_value = base_q * (1.0 + load_balance_factor * 0.4 + parallelization_bonus)
+
+        masked_q_values[hw] = adjusted_q_value
+
+    # 选择最佳动作
+    max_value = np.max(masked_q_values)
+    best_actions = [i for i in valid_actions if masked_q_values[i] == max_value]
+
+    # 处理多个最佳动作的情况
+    if not best_actions:
+        # 如果没有有效动作，选择使用率最低的硬件
         min_usage = float('inf')
         best_hw = valid_actions[0]
-
         for hw in valid_actions:
             if hw_usage_ratio[hw] < min_usage:
                 min_usage = hw_usage_ratio[hw]
                 best_hw = hw
-
-        # 更新使用计数
-        usage_count[best_hw] += 1
-        return best_hw
-
-    # 利用阶段 - 改进的策略
-    q_values_np = q_values.detach().cpu().numpy()
-
-    # 创建有效动作的Q值，并考虑负载均衡
-    masked_q_values = np.full(HARDWARE_NUM, -1e6)
-    for i in valid_actions:
-        # 结合Q值和负载均衡因子
-        load_balance_factor = 1.0 - (usage_count[i] / (sum(usage_count) + 1))
-        adjusted_q_value = q_values_np[i] * (1.0 + 0.3 * load_balance_factor)  # 负载均衡占30%权重
-        masked_q_values[i] = adjusted_q_value
-
-    # 对于紧急任务，优先选择执行时间短的硬件
-    time_remaining = task_deadline - current_time
-    avg_comp_cost = np.mean([comp_costs[i] for i in valid_actions])
-    is_urgent = time_remaining < avg_comp_cost * 2
-
-    if is_urgent:
-        # 紧急任务：选择执行时间最短的硬件
-        best_time = float('inf')
-        best_action = valid_actions[0]
-        for action in valid_actions:
-            if comp_costs[action] < best_time:
-                best_time = comp_costs[action]
-                best_action = action
-        usage_count[best_action] += 1
-        return best_action
+    elif len(best_actions) > 1:
+        # 多个相同Q值，选择使用率最低的（进一步促进并行化）
+        min_usage = float('inf')
+        best_hw = best_actions[0]
+        for hw in best_actions:
+            if hw_usage_ratio[hw] < min_usage:
+                min_usage = hw_usage_ratio[hw]
+                best_hw = hw
     else:
-        # 非紧急任务：选择调整后Q值最大的动作
-        best_action = np.argmax(masked_q_values)
-        usage_count[best_action] += 1
-        return best_action
+        best_hw = best_actions[0]
 
+    # 更新使用计数
+    hw_usage_count[best_hw] += 1
+
+    return best_hw
 
 def improved_execute_scheduling(dag, actions, current_load):
     """改进的并行调度执行，支持多硬件并行执行"""

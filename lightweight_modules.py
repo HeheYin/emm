@@ -5,47 +5,6 @@ import numpy as np
 from config import *
 
 
-# class LightweightSGC(nn.Module):
-#     """轻量级简单图卷积（替换原论文GAT）"""
-#
-#     def __init__(self, in_dim, out_dim, k=SGC_K):
-#         super().__init__()
-#         self.k = k
-#         self.weight = nn.Linear(in_dim, out_dim, bias=False)
-#         nn.init.xavier_uniform_(self.weight.weight)
-#
-#     def forward(self, x, adj):
-#         """
-#         x: 节点特征 (batch_size, task_num, in_dim)
-#         adj: 邻接矩阵 (batch_size, task_num, task_num)
-#         return: 卷积后特征 (batch_size, task_num, out_dim)
-#         """
-#         # SGC：A^k * X * W
-#         batch_size = x.shape[0]
-#         # 归一化邻接矩阵
-#         adj = self.normalize_adj(adj)
-#         # 计算A^k
-#         adj_pow = adj
-#         for _ in range(self.k - 1):
-#             adj_pow = torch.bmm(adj_pow, adj)
-#         # 特征传播
-#         x = torch.bmm(adj_pow, x)
-#         # 线性变换
-#         x = self.weight(x)
-#         return x
-#
-#     @staticmethod
-#     def normalize_adj(adj):
-#         """邻接矩阵归一化"""
-#         batch_size = adj.shape[0]
-#         for i in range(batch_size):
-#             # 添加自环
-#             adj[i] += torch.eye(adj.shape[1], device=adj.device)
-#             # 行归一化
-#             row_sum = adj[i].sum(dim=1, keepdim=True)
-#             adj[i] = adj[i] / (row_sum + 1e-6)
-#         return adj
-
 class GAT(nn.Module):
     """图注意力网络（替换LightweightSGC）"""
 
@@ -219,29 +178,6 @@ class LightweightSetTransformer(nn.Module):
         return out
 
 
-# class SpatioTemporalEmbedder(nn.Module):
-#     """时空嵌入层（SGC+GRU）"""
-#
-#     def __init__(self, task_feat_dim, adj_dim):
-#         super().__init__()
-#         self.sgc = LightweightSGC(task_feat_dim, EMBED_DIM)
-#         self.gru = TemporalGRU(EMBED_DIM)
-#         self.global_pool = nn.AdaptiveMaxPool1d(1)
-#
-#     def forward(self, task_feat, adj, seq_order):
-#         """
-#         task_feat: 任务特征 (batch_size, task_num, task_feat_dim)
-#         adj: 邻接矩阵 (batch_size, task_num, task_num)
-#         seq_order: 任务优先级顺序 (batch_size, task_num)
-#         return: 任务嵌入 (batch_size, task_num, EMBED_DIM), 全局DAG嵌入 (batch_size, EMBED_DIM)
-#         """
-#         # 空间嵌入（SGC）
-#         spatial_embed = self.sgc(task_feat, adj)
-#         # 时序嵌入（GRU）
-#         spatio_temporal_embed = self.gru(spatial_embed, seq_order)
-#         # 全局DAG嵌入
-#         global_embed = self.global_pool(spatio_temporal_embed.transpose(1, 2)).squeeze(-1)
-#         return spatio_temporal_embed, global_embed
 class SpatioTemporalEmbedder(nn.Module):
     """时空嵌入层（GAT+GRU）"""
 

@@ -94,7 +94,7 @@ WEIGHTS = {
     "能耗优先": {"makespan": 0.2, "load": 0.2, "energy": 0.4, "reliability": 0.2},
     "均衡模式": {"makespan": 0.3, "load": 0.25, "energy": 0.25, "reliability": 0.2}
 }
-CURRENT_MODE = "能耗优先"
+CURRENT_MODE = "实时优先"
 
 # ===================== 并行执行配置 =====================
 PARALLEL_EXECUTION = True  # 启用并行执行
@@ -112,14 +112,3 @@ BASELINE_ALGORITHMS = ["HEFT", "RM", "EDF"]  # 简化基线算法
 
 # ===================== 设备配置 =====================
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# BASELINE_ALGORITHMS = ["HEFT", "CPOP", "ADTS", "RM", "EDF", "LLF"]
-#
-# # ===================== 硬件实测配置 =====================
-# HARDWARE_PLATFORM = "JetsonNano+STM32+FPGA"
-# POWER_METER_PATH = "/dev/power_meter"  # 功率计设备路径（模拟）
-# TEMPERATURE_SENSOR_PATH = "/dev/temp_sensor"  # 温度传感器路径（模拟）
-#
-# # ===================== 设备配置 =====================
-# DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# # 嵌入式设备强制使用CPU时注释上一行，启用下一行
-# # DEVICE = torch.device("cpu")

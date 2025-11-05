@@ -20,7 +20,7 @@ class DetailedSchedulerVisualizer:
         fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6))
 
         # 1. DAG结构图
-        self._plot_dag_structure(ax1, dag, "DAG任务依赖结构")
+        self._plot_dag_structure(ax1, dag, "DAG Task Dependency Structure")
 
         # 2. 调度甘特图
         self._plot_schedule_gantt(ax2, schedule_result, algorithm_name)
@@ -114,27 +114,27 @@ class DetailedSchedulerVisualizer:
         # 1. Makespan对比
         makespans = [result["makespan"] for result in algorithm_results.values()]
         axes[0].bar(algorithms, makespans, color=['skyblue', 'lightgreen', 'lightcoral'])
-        axes[0].set_title("各算法Makespan对比")
+        axes[0].set_title("Makespan Comparison")
         axes[0].set_ylabel("Makespan (ms)")
 
         # 2. 能耗对比
         energies = [result["total_energy"] for result in algorithm_results.values()]
         axes[1].bar(algorithms, energies, color=['skyblue', 'lightgreen', 'lightcoral'])
-        axes[1].set_title("各算法能耗对比")
-        axes[1].set_ylabel("能耗 (J)")
+        axes[1].set_title("Energy Consumption Comparison")
+        axes[1].set_ylabel("Energy (J)")
 
         # 3. 截止时间满足率
         deadline_rates = [result["deadline_satisfaction_rate"] for result in algorithm_results.values()]
         axes[2].bar(algorithms, deadline_rates, color=['skyblue', 'lightgreen', 'lightcoral'])
-        axes[2].set_title("截止时间满足率")
-        axes[2].set_ylabel("满足率")
+        axes[2].set_title("Deadline Satisfaction Rate")
+        axes[2].set_ylabel("Satisfaction Rate")
         axes[2].set_ylim(0, 1)
 
         # 4. 负载均衡对比
         load_balances = [result["load_balance"] for result in algorithm_results.values()]
         axes[3].bar(algorithms, load_balances, color=['skyblue', 'lightgreen', 'lightcoral'])
-        axes[3].set_title("负载均衡（方差）")
-        axes[3].set_ylabel("方差")
+        axes[3].set_title("Load Balance (Variance)")
+        axes[3].set_ylabel("Variance")
 
         plt.tight_layout()
         plt.savefig(f"algorithm_comparison_dag{dag.dag_id}.png", dpi=300, bbox_inches='tight')
@@ -671,7 +671,7 @@ class ExperimentEvaluator:
         makespans = [self.results["baseline"][algo]["makespan"] for algo in algorithms[:-1]] + [
             self.results["modrl"]["makespan"]]
         plt.bar(algorithms, makespans, color=["gray"] * (len(algorithms) - 1) + ["red"])
-        plt.title("各算法平均Makespan对比")
+        plt.title("Average Makespan Comparison")
         plt.ylabel("Makespan (ms)")
         plt.xticks(rotation=45)
 
@@ -680,8 +680,8 @@ class ExperimentEvaluator:
         load_balances = [self.results["baseline"][algo]["load_balance"] for algo in algorithms[:-1]] + [
             self.results["modrl"]["load_balance"]]
         plt.bar(algorithms, load_balances, color=["gray"] * (len(algorithms) - 1) + ["red"])
-        plt.title("各算法平均负载均衡（方差越小越好）")
-        plt.ylabel("负载方差")
+        plt.title("Average Load Balance (Lower is Better)")
+        plt.ylabel("Load Variance")
         plt.xticks(rotation=45)
 
         # 子图3：能耗
@@ -689,16 +689,16 @@ class ExperimentEvaluator:
         energies = [self.results["baseline"][algo]["energy"] for algo in algorithms[:-1]] + [
             self.results["modrl"]["energy"]]
         plt.bar(algorithms, energies, color=["gray"] * (len(algorithms) - 1) + ["red"])
-        plt.title("各算法平均能耗对比")
-        plt.ylabel("能耗 (J)")
+        plt.title("Average Energy Consumption Comparison")
+        plt.ylabel("Energy (J)")
         plt.xticks(rotation=45)
 
         # 子图4：截止时间满足率
         plt.subplot(2, 2, 4)
         deadline_rates = [0.0] * len(algorithms[:-1]) + [self.results["modrl"]["deadline_satisfaction"]]
         plt.bar(algorithms, deadline_rates, color=["gray"] * (len(algorithms) - 1) + ["red"])
-        plt.title("截止时间满足率对比")
-        plt.ylabel("满足率")
+        plt.title("Deadline Satisfaction Rate Comparison")
+        plt.ylabel("Satisfaction Rate")
         plt.xticks(rotation=45)
         plt.ylim(0, 1)
 

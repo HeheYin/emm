@@ -7,29 +7,7 @@ from task_model import EmbeddedDAG, EmbeddedTaskNode
 
 
 class DynamicTaskBuffer:
-    """动态任务缓存队列（支持POMDP模型）"""
 
-    # def __init__(self, buffer_size=100):
-    #     self.buffer = deque(maxlen=buffer_size)
-    #     self.arrival_rate_window = deque(maxlen=100)  # 滑动窗口统计到达率
-    #     self.last_arrival_time = 0
-
-    # def add_task(self, task_node, current_time):
-    #     """添加动态任务"""
-    #     # 计算到达间隔
-    #     if self.last_arrival_time > 0:
-    #         inter_arrival = current_time - self.last_arrival_time
-    #         self.arrival_rate_window.append(1 / inter_arrival if inter_arrival > 0 else 0)
-    #     self.last_arrival_time = current_time
-    #     # 按优先级插入队列（高优先级在前）
-    #     inserted = False
-    #     for i in range(len(self.buffer)):
-    #         if task_node.priority > self.buffer[i].priority:
-    #             self.buffer.insert(i, task_node)
-    #             inserted = True
-    #             break
-    #     if not inserted:
-    #         self.buffer.append(task_node)
     def __init__(self, capacity=100):
         """初始化动态任务缓冲区"""
         self.buffer = deque(maxlen=capacity)  # 设置deque的最大长度
