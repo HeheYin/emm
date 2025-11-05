@@ -434,10 +434,10 @@ class PPOSchedulingEnvironment:
 
         # 综合奖励
         total_reward = (
-                progress_reward * 0.3 +
-                time_penalty * 0.3 +
-                load_balance_reward * 0.3 +
-                energy_penalty * 0.1
+                progress_reward * 0.1 +
+                time_penalty * 0.4 +
+                load_balance_reward * 0.1 +
+                energy_penalty * 0.4
         )
 
         return total_reward * REWARD_SCALE
@@ -759,19 +759,22 @@ def compare_with_baselines(ppo_results, dataset):
           f"Deadline Rate={ppo_results['deadline_rate']:.2%}")
 
 
-def demo_ppo_scheduling(ppo_scheduler, dataset):
-    """演示PPO调度过程"""
-    print("===== PPO调度演示 =====")
 
-    visualizer = DetailedSchedulerVisualizer()
+def compare_schedules_on_same_task(ppo_scheduler, dataset):
+    """在相同任务下对比PPO和基线算法的调度方案"""
+    print("===== 相同任务下调度方案对比 =====")
 
     # 选择一个测试DAG
     task_type = "工业控制"
     dag = dataset["split"][task_type][0]
 
-    print(f"演示DAG: {dag.dag_id} ({task_type}), 任务数: {len(dag.task_nodes)}")
+    print(f"对比DAG: {dag.dag_id} ({task_type}), 任务数: {len(dag.task_nodes)}")
 
-    # 使用PPO进行调度
+    # 收集所有算法的调度结果
+    all_schedules = {}
+
+    # 1. PPO调度
+    print("执行PPO调度...")
     env = PPOSchedulingEnvironment(dataset)
     env.ppo_scheduler = ppo_scheduler
     state, _ = env.reset()
@@ -792,44 +795,290 @@ def demo_ppo_scheduling(ppo_scheduler, dataset):
     while not done:
         state, reward, done, info = env.step(actions, current_load_states)
 
-    # 构建调度结果
-    schedule_result = {
+    # 构建PPO调度结果
+    ppo_schedule = {
+        "algorithm": "PPO",
         "makespan": info['makespan'],
         "total_energy": info['energy'],
-        "deadline_satisfaction_rate": 0.0,  # 需要单独计算
-        "load_balance": 0.0,  # 需要单独计算
         "task_schedule": {},
-        "hardware_usage": {i: {"total_time": env.hw_timelines[i]['next_available']}
+        "hardware_usage": {i: {"total_time": env.hw_timelines[i]['next_available'],
+                               "tasks": env.hw_timelines[i]['tasks']}
                            for i in range(HARDWARE_NUM)}
     }
 
-    # 计算截止时间满足率
-    deadline_met = 0
     for task_id, finish_time in env.task_finish_times.items():
-        task = dag.task_nodes[task_id]
         task_idx = task_ids.index(task_id)
         hw_idx = actions[task_idx]
+        ppo_schedule["task_schedule"][task_id] = (
+            hw_idx, env.task_start_times[task_id], finish_time
+        )
 
-        schedule_result["task_schedule"][task_id] = (hw_idx,
-                                                     env.task_start_times[task_id],
-                                                     finish_time)
+    all_schedules["PPO"] = ppo_schedule
 
-        if finish_time <= task.deadline:
-            deadline_met += 1
+    # 2. 基线算法调度
+    baseline_algorithms = ["HEFT", "RM", "EDF"]
 
-    schedule_result["deadline_satisfaction_rate"] = deadline_met / len(task_ids)
+    for algo in baseline_algorithms:
+        print(f"执行{algo}调度...")
+        schedule_result = simulate_baseline_schedule(dag, algo)
+        schedule_result["algorithm"] = algo
+        all_schedules[algo] = schedule_result
 
-    # 计算负载均衡
-    hw_times = [env.hw_timelines[i]['next_available'] for i in range(HARDWARE_NUM)]
-    schedule_result["load_balance"] = np.var(hw_times)
+    # 3. 计算各项指标
+    algorithms = list(all_schedules.keys())
+    metrics = {
+        'makespan': [],
+        'energy': [],
+        'utilization': [],  # 硬件利用率
+        'task_distribution': []  # 任务分布均匀度
+    }
 
-    # 可视化调度结果
-    visualizer.visualize_single_dag_schedule(dag, schedule_result, "PPO")
+    for algo in algorithms:
+        schedule = all_schedules[algo]
+        metrics['makespan'].append(schedule['makespan'])
+        metrics['energy'].append(schedule['total_energy'])
 
-    print(f"调度完成: Makespan={info['makespan']:.2f}ms, "
-          f"Energy={info['energy']:.2f}J, "
-          f"Deadline Rate={schedule_result['deadline_satisfaction_rate']:.2%}")
+        # 计算硬件利用率
+        hw_times = [schedule['hardware_usage'][i]['total_time'] for i in range(HARDWARE_NUM)]
+        total_used_time = sum(hw_times)
+        total_possible_time = schedule['makespan'] * HARDWARE_NUM
+        utilization = total_used_time / total_possible_time if total_possible_time > 0 else 0
+        metrics['utilization'].append(utilization)
 
+        # 计算任务分布均匀度（1 - 标准差/均值）
+        task_counts = [len(schedule['hardware_usage'][i].get('tasks', [])) for i in range(HARDWARE_NUM)]
+        if np.mean(task_counts) > 0:
+            distribution_balance = 1 - np.std(task_counts) / np.mean(task_counts)
+        else:
+            distribution_balance = 0
+        metrics['task_distribution'].append(distribution_balance)
+
+    # 4. 绘制综合对比图
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+
+    # Makespan对比
+    bars1 = ax1.bar(algorithms, metrics['makespan'], color=['red', 'blue', 'green', 'orange'])
+    ax1.set_title('Makespan Comparison (lower is better)', fontsize=14, fontweight='bold')
+    ax1.set_ylabel('Makespan (ms)', fontsize=12)
+    ax1.tick_params(axis='x', rotation=45)
+    # 添加数值标签
+    for bar in bars1:
+        height = bar.get_height()
+        ax1.text(bar.get_x() + bar.get_width() / 2., height,
+                 f'{height:.1f}', ha='center', va='bottom', fontweight='bold')
+
+    # 能耗对比
+    bars2 = ax2.bar(algorithms, metrics['energy'], color=['red', 'blue', 'green', 'orange'])
+    ax2.set_title('Energy Consumption Comparison (越小越好)', fontsize=14, fontweight='bold')
+    ax2.set_ylabel('Energy (J)', fontsize=12)
+    ax2.tick_params(axis='x', rotation=45)
+    # 添加数值标签
+    for bar in bars2:
+        height = bar.get_height()
+        ax2.text(bar.get_x() + bar.get_width() / 2., height,
+                 f'{height:.1f}', ha='center', va='bottom', fontweight='bold')
+
+    # 硬件利用率对比
+    bars3 = ax3.bar(algorithms, metrics['utilization'], color=['red', 'blue', 'green', 'orange'])
+    ax3.set_title('Hardware Utilization (higher is better)', fontsize=14, fontweight='bold')
+    ax3.set_ylabel('Utilization Rate', fontsize=12)
+    ax3.tick_params(axis='x', rotation=45)
+    # 添加数值标签
+    for bar in bars3:
+        height = bar.get_height()
+        ax3.text(bar.get_x() + bar.get_width() / 2., height,
+                 f'{height:.3f}', ha='center', va='bottom', fontweight='bold')
+
+    # 任务分布对比
+    bars4 = ax4.bar(algorithms, metrics['task_distribution'], color=['red', 'blue', 'green', 'orange'])
+    ax4.set_title('Task Distribution Balance (higher is better)', fontsize=14, fontweight='bold')
+    ax4.set_ylabel('Balance Score', fontsize=12)
+    ax4.tick_params(axis='x', rotation=45)
+    # 添加数值标签
+    for bar in bars4:
+        height = bar.get_height()
+        ax4.text(bar.get_x() + bar.get_width() / 2., height,
+                 f'{height:.3f}', ha='center', va='bottom', fontweight='bold')
+
+    plt.tight_layout()
+    plt.savefig('same_task_comparison.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+    # 5. 绘制甘特图对比
+    plot_gantt_comparison(all_schedules, dag)
+
+    # 6. 输出详细结果
+    print("\n相同任务下各算法调度结果:")
+    print("=" * 80)
+    for algo in algorithms:
+        schedule = all_schedules[algo]
+        print(f"\n{algo}算法:")
+        print(f"  - Makespan: {schedule['makespan']:.2f} ms")
+        print(f"  - 总能耗: {schedule['total_energy']:.2f} J")
+        print(f"  - 硬件利用率: {metrics['utilization'][algorithms.index(algo)]:.3f}")
+        print(f"  - 任务分布均衡度: {metrics['task_distribution'][algorithms.index(algo)]:.3f}")
+
+        # 显示任务分配情况
+        hw_task_counts = [len(schedule['hardware_usage'][i].get('tasks', [])) for i in range(HARDWARE_NUM)]
+        print(f"  - 硬件任务分配: {hw_task_counts}")
+
+    return all_schedules
+
+
+def plot_gantt_comparison(all_schedules, dag):
+    """绘制各算法调度的甘特图对比"""
+    print("生成甘特图对比...")
+
+    algorithms = list(all_schedules.keys())
+    task_ids = sorted(dag.task_nodes.keys())
+
+    # 创建子图
+    fig, axes = plt.subplots(2, 2, figsize=(20, 12))
+    axes = axes.flatten()
+
+    colors = plt.cm.Set3(np.linspace(0, 1, len(task_ids)))
+
+    for idx, algo in enumerate(algorithms):
+        if idx >= len(axes):
+            break
+
+        ax = axes[idx]
+        schedule = all_schedules[algo]
+        task_schedule = schedule.get("task_schedule", {})
+
+        # 绘制甘特图
+        for task_id, (hw_idx, start_time, finish_time) in task_schedule.items():
+            task_idx = list(task_ids).index(task_id)
+            duration = finish_time - start_time
+
+            ax.barh(hw_idx, duration, left=start_time, height=0.6,
+                    color=colors[task_idx], alpha=0.7, edgecolor='black', linewidth=0.5,
+                    label=f'Task {task_id}' if idx == 0 else "")
+
+        ax.set_title(
+            f'{algo} Schedule\nMakespan: {schedule["makespan"]:.2f}ms, Energy: {schedule["total_energy"]:.2f}J',
+            fontsize=12, fontweight='bold')
+        ax.set_xlabel('Time (ms)', fontsize=10)
+        ax.set_ylabel('Hardware', fontsize=10)
+        ax.set_yticks(range(HARDWARE_NUM))
+        ax.set_yticklabels([f'HW{i}' for i in range(HARDWARE_NUM)])
+        ax.grid(True, alpha=0.3)
+
+        # 添加任务ID标签
+        for task_id, (hw_idx, start_time, finish_time) in task_schedule.items():
+            ax.text((start_time + finish_time) / 2, hw_idx, f'T{task_id}',
+                    ha='center', va='center', fontsize=8, fontweight='bold',
+                    bbox=dict(boxstyle="round,pad=0.1", facecolor='white', alpha=0.7))
+
+    # 添加图例
+    if task_schedule:
+        handles = [plt.Rectangle((0, 0), 1, 1, color=colors[i]) for i in range(len(task_ids))]
+        axes[0].legend(handles, [f'Task {tid}' for tid in task_ids],
+                       bbox_to_anchor=(1.05, 1), loc='upper left')
+
+    plt.tight_layout()
+    plt.savefig('gantt_comparison_same_task.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+def simulate_baseline_schedule(dag, algorithm):
+    """模拟基线算法的调度结果"""
+    task_ids = sorted(dag.task_nodes.keys())
+    task_schedule = {}
+
+    # 简化的调度模拟
+    current_time = 0.0
+    hw_available = {i: 0.0 for i in range(HARDWARE_NUM)}
+    hw_tasks = {i: [] for i in range(HARDWARE_NUM)}  # 记录每个硬件的任务
+
+    try:
+        topological_order = list(nx.topological_sort(dag.graph))
+    except:
+        topological_order = task_ids
+
+    for task_id in topological_order:
+        task_idx = task_ids.index(task_id)
+
+        # 根据算法选择硬件
+        if algorithm == "HEFT":
+            # HEFT通常会选择最早完成时间的硬件
+            best_hw = 0
+            best_finish = float('inf')
+            for hw_idx in range(HARDWARE_NUM):
+                if dag.comp_matrix[task_idx, hw_idx] != float('inf'):
+                    # 考虑前驱任务的完成时间
+                    pred_finish = current_time
+                    for pred_id in dag.graph.predecessors(task_id):
+                        if pred_id in task_schedule:
+                            pred_hw = task_schedule[pred_id][0]
+                            pred_finish = max(pred_finish, task_schedule[pred_id][2])
+                            # 考虑通信延迟
+                            pred_idx = task_ids.index(pred_id)
+                            comm_delay = dag.comm_matrix[pred_idx, task_idx, pred_hw, hw_idx]
+                            pred_finish += comm_delay
+
+                    start_time = max(hw_available[hw_idx], pred_finish)
+                    finish_time = start_time + dag.comp_matrix[task_idx, hw_idx]
+                    if finish_time < best_finish:
+                        best_finish = finish_time
+                        best_hw = hw_idx
+        elif algorithm == "RM":
+            # RM通常选择负载最小的硬件
+            best_hw = min(hw_available.items(), key=lambda x: x[1])[0]
+        else:  # EDF
+            # EDF通常考虑截止时间，选择能最早完成的硬件
+            task = dag.task_nodes[task_id]
+            best_hw = 0
+            best_finish = float('inf')
+            for hw_idx in range(HARDWARE_NUM):
+                if dag.comp_matrix[task_idx, hw_idx] != float('inf'):
+                    start_time = max(hw_available[hw_idx], current_time)
+                    finish_time = start_time + dag.comp_matrix[task_idx, hw_idx]
+                    if finish_time < best_finish:
+                        best_finish = finish_time
+                        best_hw = hw_idx
+
+        # 计算开始和结束时间（考虑前驱依赖）
+        start_time = hw_available[best_hw]
+        for pred_id in dag.graph.predecessors(task_id):
+            if pred_id in task_schedule:
+                pred_finish = task_schedule[pred_id][2]
+                pred_idx = task_ids.index(pred_id)
+                pred_hw = task_schedule[pred_id][0]
+                comm_delay = dag.comm_matrix[pred_idx, task_idx, pred_hw, best_hw]
+                start_time = max(start_time, pred_finish + comm_delay)
+
+        start_time = max(start_time, current_time)
+        finish_time = start_time + dag.comp_matrix[task_idx, best_hw]
+
+        # 更新硬件可用时间
+        hw_available[best_hw] = finish_time
+
+        # 记录任务到硬件
+        hw_tasks[best_hw].append({
+            'task_id': task_id,
+            'start_time': start_time,
+            'finish_time': finish_time
+        })
+
+        # 记录调度
+        task_schedule[task_id] = (best_hw, start_time, finish_time)
+
+        current_time = max(current_time, finish_time)
+
+    # 计算总能耗
+    total_energy = 0.0
+    for task_id, (hw_idx, start, finish) in task_schedule.items():
+        task_idx = task_ids.index(task_id)
+        total_energy += dag.energy_matrix[task_idx, hw_idx]
+
+    return {
+        "makespan": current_time,
+        "total_energy": total_energy,
+        "task_schedule": task_schedule,
+        "hardware_usage": {i: {"total_time": hw_available[i], "tasks": hw_tasks[i]}
+                           for i in range(HARDWARE_NUM)}
+    }
 
 if __name__ == "__main__":
     # 设置随机种子
@@ -838,7 +1087,7 @@ if __name__ == "__main__":
     np.random.seed(seed)
     random.seed(seed)
 
-    print(f"使用设备: {DEVICE}")
+
 
     # 训练PPO调度器
     ppo_scheduler, training_metrics = train_ppo_scheduler()
@@ -846,9 +1095,11 @@ if __name__ == "__main__":
     test_dataset = EmbeddedDatasetGenerator.generate_dataset()
     # 评估PPO调度器
     ppo_results = evaluate_ppo_scheduler(ppo_scheduler, test_dataset)
-    # 与基线算法对比
-    compare_with_baselines(ppo_results, test_dataset)
+    # # 与基线算法对比
+    # compare_with_baselines(ppo_results, test_dataset)
+    # # 在相同任务下对比所有算法
+    # compare_schedules_on_same_task(ppo_scheduler, test_dataset)
     # 演示调度过程
-    demo_ppo_scheduling(ppo_scheduler, test_dataset)
+    # demo_ppo_scheduling(ppo_scheduler, test_dataset)
 
     print("PPO嵌入式任务调度系统运行完成!")
