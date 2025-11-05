@@ -96,6 +96,11 @@ WEIGHTS = {
 }
 CURRENT_MODE = "能耗优先"
 
+# ===================== 并行执行配置 =====================
+PARALLEL_EXECUTION = True  # 启用并行执行
+MAX_PARALLEL_TASKS = 4     # 最大并行任务数
+COMMUNICATION_BANDWIDTH = 100.0  # 通信带宽 MB/s
+
 # ===================== 实验配置 =====================
 DATASET_SIZE = {
     "工业控制": 150,

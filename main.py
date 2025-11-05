@@ -9,7 +9,7 @@ import random
 from config import *
 from task_model import EmbeddedDAG, TaskSplitter
 from layered_optimization import MODRLScheduler, MultiObjectiveReward, TaskMigrationStrategy
-from experiment import EmbeddedDatasetGenerator, BaselineScheduler
+from experiment import EmbeddedDatasetGenerator, BaselineScheduler, DetailedSchedulerVisualizer
 from special_scenarios import DynamicTaskBuffer, MultiSoftwareScheduler
 
 
@@ -86,6 +86,10 @@ def prepare_dag_input(dag):
 
     return task_feat, adj, seq_order, hardware_feat, load_states, history_resource
 
+def reset_hardware_usage():
+    """重置硬件使用计数"""
+    if hasattr(improved_select_action, 'hw_usage_count'):
+        improved_select_action.hw_usage_count = [0] * HARDWARE_NUM
 
 def main():
     # 设置随机种子以获得可重复的结果
@@ -99,16 +103,7 @@ def main():
     print("===== 生成嵌入式任务数据集 =====")
     dataset = EmbeddedDatasetGenerator.generate_dataset()
 
-    # 验证DAG质量
-    print("===== 验证DAG质量 =====")
-    is_valid = validate_dag_quality(dataset)
-    if not is_valid:
-        print("警告：存在循环依赖的DAG，建议重新生成数据集")
-        # 可以选择重新生成或继续
-        user_input = input("是否重新生成数据集? (y/n): ")
-        if user_input.lower() == 'y':
-            dataset = EmbeddedDatasetGenerator.generate_dataset()
-            validate_dag_quality(dataset)
+
 
     # 3. 初始化MODRL调度器
     print("===== 初始化MODRL调度器 =====")
@@ -147,6 +142,7 @@ def main():
     pbar = tqdm(range(total_episodes), desc="训练进度")
     for episode in pbar:
         # 获取当前ε值
+        reset_hardware_usage()
         epsilon = epsilon_strategy.get_epsilon()
         metrics["epsilon"].append(epsilon)
 
@@ -314,10 +310,14 @@ def main():
 
 
 def calculate_simple_reward(makespan, load_states, hardware_thresholds, energy, priority, deadline_satisfaction):
-    """修正的奖励计算，使用动态权重"""
+    """修正的奖励计算，加强负载均衡"""
     # 归一化各项指标
     makespan_reward = 1.0 / (1.0 + makespan / 100.0)
-    load_reward = 1.0 - np.std(load_states)
+
+    # 加强负载均衡奖励
+    load_imbalance = np.std(load_states)  # 使用标准差衡量不均衡程度
+    load_reward = 1.0 / (1.0 + load_imbalance * 10)  # 放大负载均衡的影响
+
     energy_reward = 1.0 / (1.0 + energy / 500.0)
 
     # 可靠性惩罚
@@ -328,41 +328,66 @@ def calculate_simple_reward(makespan, load_states, hardware_thresholds, energy, 
 
     reliability_reward = 1.0 - min(reliability_penalty / len(load_states), 1.0)
 
-    # 修复：使用config中的动态权重，修正键名
+    # 使用config中的动态权重
     weights = WEIGHTS[CURRENT_MODE]
 
-    # 综合奖励 - 修正键名和权重分配
+    # 综合奖励 - 加强负载均衡权重
     total_reward = (
-        makespan_reward * weights["makespan"] +
-        deadline_satisfaction * weights["reliability"] +  # 截止时间满足率使用reliability权重
-        load_reward * weights["load"] +
-        energy_reward * weights["energy"] +
-        reliability_reward * weights["reliability"]  # 可靠性奖励也使用reliability权重
-    ) * (0.5 + priority / 20.0)
+                           makespan_reward * weights["makespan"] +
+                           deadline_satisfaction * weights["reliability"] +
+                           load_reward * (weights["load"] + 0.2) +  # 增加负载均衡权重
+                           energy_reward * weights["energy"] +
+                           reliability_reward * weights["reliability"]
+                   ) * (0.5 + priority / 20.0)
 
     return float(total_reward)
 
+
 def improved_select_action(q_values, epsilon, comp_costs, task_deadline, current_time):
-    """改进的动作选择，考虑截止时间"""
+    """改进的动作选择，考虑负载均衡和并行执行"""
     valid_actions = [i for i, cost in enumerate(comp_costs) if cost != float('inf')]
     if not valid_actions:
         return random.randint(0, HARDWARE_NUM - 1)
 
-    # 探索阶段
+    # 全局硬件使用计数
+    if not hasattr(improved_select_action, 'hw_usage_count'):
+        improved_select_action.hw_usage_count = [0] * HARDWARE_NUM
+    usage_count = improved_select_action.hw_usage_count
+
+    # 探索阶段 - 改进的负载均衡策略
     if random.random() < epsilon:
-        return random.choice(valid_actions)
+        # 计算每个硬件的相对使用率
+        total_usage = sum(usage_count) if sum(usage_count) > 0 else 1
+        hw_usage_ratio = [count / total_usage for count in usage_count]
+
+        # 选择使用率最低的有效硬件
+        min_usage = float('inf')
+        best_hw = valid_actions[0]
+
+        for hw in valid_actions:
+            if hw_usage_ratio[hw] < min_usage:
+                min_usage = hw_usage_ratio[hw]
+                best_hw = hw
+
+        # 更新使用计数
+        usage_count[best_hw] += 1
+        return best_hw
 
     # 利用阶段 - 改进的策略
     q_values_np = q_values.detach().cpu().numpy()
 
-    # 创建有效动作的Q值
+    # 创建有效动作的Q值，并考虑负载均衡
     masked_q_values = np.full(HARDWARE_NUM, -1e6)
     for i in valid_actions:
-        masked_q_values[i] = q_values_np[i]
+        # 结合Q值和负载均衡因子
+        load_balance_factor = 1.0 - (usage_count[i] / (sum(usage_count) + 1))
+        adjusted_q_value = q_values_np[i] * (1.0 + 0.3 * load_balance_factor)  # 负载均衡占30%权重
+        masked_q_values[i] = adjusted_q_value
 
     # 对于紧急任务，优先选择执行时间短的硬件
     time_remaining = task_deadline - current_time
-    is_urgent = time_remaining < np.mean(comp_costs[valid_actions]) * 2
+    avg_comp_cost = np.mean([comp_costs[i] for i in valid_actions])
+    is_urgent = time_remaining < avg_comp_cost * 2
 
     if is_urgent:
         # 紧急任务：选择执行时间最短的硬件
@@ -372,78 +397,144 @@ def improved_select_action(q_values, epsilon, comp_costs, task_deadline, current
             if comp_costs[action] < best_time:
                 best_time = comp_costs[action]
                 best_action = action
+        usage_count[best_action] += 1
         return best_action
     else:
-        # 非紧急任务：选择Q值最大的动作
-        return np.argmax(masked_q_values)
+        # 非紧急任务：选择调整后Q值最大的动作
+        best_action = np.argmax(masked_q_values)
+        usage_count[best_action] += 1
+        return best_action
 
 
 def improved_execute_scheduling(dag, actions, current_load):
-    """改进的调度执行，增强循环依赖处理"""
+    """改进的并行调度执行，支持多硬件并行执行"""
     task_ids = sorted(dag.task_nodes.keys())
     makespan = 0.0
     total_energy = 0.0
-    hw_finish_times = np.zeros(HARDWARE_NUM)
+
+    # 初始化硬件状态 - 每个硬件维护任务时间线
+    hw_timelines = {
+        i: {
+            'tasks': [],  # 已安排的任务列表 (start_time, finish_time, task_id)
+            'next_available': 0.0  # 下一个可用时间
+        } for i in range(HARDWARE_NUM)
+    }
+
     task_finish_times = {}
+    task_start_times = {}
+    completed_tasks = set()
 
-    # 创建图的副本
-    graph_copy = dag.graph.copy()
-
-    # 增强的拓扑排序处理
+    # 获取拓扑顺序
     try:
-        topological_order = list(nx.topological_sort(graph_copy))
+        topological_order = list(nx.topological_sort(dag.graph))
     except nx.NetworkXUnfeasible:
-        print(f"严重警告：DAG {dag.dag_id} 存在无法解决的循环依赖")
-        # 使用节点ID顺序作为备选
+        print(f"警告：DAG {dag.dag_id} 存在循环依赖，使用ID顺序")
         topological_order = task_ids
-        # 记录问题以便后续分析
-        with open("cyclic_dags.log", "a") as f:
-            f.write(f"DAG {dag.dag_id} 存在循环依赖，使用ID顺序\n")
 
-    # 初始化完成时间
-    for task_id in task_ids:
-        task_finish_times[task_id] = 0.0
+    current_time = 0.0
+    max_iterations = 10000  # 防止无限循环
+    iteration = 0
 
-    # 按照拓扑顺序执行任务
-    for task_id in topological_order:
-        task_idx = task_ids.index(task_id)
-        hw_idx = actions[task_idx] if task_idx < len(actions) else 0
+    while len(completed_tasks) < len(task_ids) and iteration < max_iterations:
+        iteration += 1
+        scheduled_this_round = False
 
-        # 硬件支持检查
-        if dag.comp_matrix[task_idx, hw_idx] == float('inf'):
-            valid_hw = [j for j in range(HARDWARE_NUM) if dag.comp_matrix[task_idx, j] != float('inf')]
-            hw_idx = valid_hw[0] if valid_hw else 0
+        # 按拓扑顺序检查每个任务是否可以开始执行
+        for task_id in topological_order:
+            if task_id in completed_tasks:
+                continue
 
-        exec_time = dag.comp_matrix[task_idx, hw_idx]
-        energy = dag.energy_matrix[task_idx, hw_idx]
+            task_idx = task_ids.index(task_id)
+            hw_idx = actions[task_idx] if task_idx < len(actions) else 0
 
-        # 计算开始时间
-        start_time = hw_finish_times[hw_idx]
+            # 检查硬件支持
+            if dag.comp_matrix[task_idx, hw_idx] == float('inf'):
+                valid_hw = [j for j in range(HARDWARE_NUM) if dag.comp_matrix[task_idx, j] != float('inf')]
+                if valid_hw:
+                    hw_idx = valid_hw[0]  # 选择第一个有效的硬件
+                else:
+                    continue  # 没有可用硬件，跳过
 
-        # 检查前驱任务完成时间
-        pred_finish_times = []
-        for pred_id in list(graph_copy.predecessors(task_id)):  # 转换为list避免在迭代中修改
-            if pred_id in task_finish_times:
-                pred_finish = task_finish_times[pred_id]
-                pred_idx = task_ids.index(pred_id)
-                comm_delay = np.mean(dag.comm_matrix[pred_idx, task_idx]) if dag.comm_matrix[
-                    pred_idx, task_idx].any() else 0
-                pred_finish_times.append(pred_finish + comm_delay)
+            # 检查前驱任务是否都已完成
+            can_start = True
+            earliest_start = hw_timelines[hw_idx]['next_available']
 
-        if pred_finish_times:
-            start_time = max(start_time, max(pred_finish_times))
+            for pred_id in dag.graph.predecessors(task_id):
+                if pred_id not in completed_tasks:
+                    can_start = False
+                    break
+                else:
+                    # 考虑通信延迟
+                    pred_idx = task_ids.index(pred_id)
+                    pred_hw_idx = actions[pred_idx] if pred_idx < len(actions) else 0
+                    comm_delay = dag.comm_matrix[pred_idx, task_idx, pred_hw_idx, hw_idx]
+                    pred_finish = task_finish_times[pred_id] + comm_delay
+                    earliest_start = max(earliest_start, pred_finish)
 
-        finish_time = start_time + exec_time
-        hw_finish_times[hw_idx] = finish_time
-        task_finish_times[task_id] = finish_time
+            if can_start and task_id not in task_start_times:
+                # 任务可以开始执行
+                exec_time = dag.comp_matrix[task_idx, hw_idx]
+                start_time = max(earliest_start, current_time)
+                finish_time = start_time + exec_time
 
-        # 更新负载
-        current_load[hw_idx] = min(current_load[hw_idx] + 0.1, 1.0)
-        makespan = max(makespan, finish_time)
-        total_energy += energy
+                # 更新任务时间
+                task_start_times[task_id] = start_time
+                task_finish_times[task_id] = finish_time
+
+                # 更新硬件时间线
+                hw_timelines[hw_idx]['tasks'].append({
+                    'task_id': task_id,
+                    'start_time': start_time,
+                    'finish_time': finish_time
+                })
+                hw_timelines[hw_idx]['next_available'] = finish_time
+
+                # 计算能耗
+                energy = dag.energy_matrix[task_idx, hw_idx]
+                total_energy += energy
+
+                scheduled_this_round = True
+
+        # 完成当前时间点已完成的任务
+        completed_this_round = set()
+        for task_id in topological_order:
+            if (task_id in task_finish_times and
+                    task_id not in completed_tasks and
+                    task_finish_times[task_id] <= current_time):
+                completed_tasks.add(task_id)
+                completed_this_round.add(task_id)
+
+        # 推进时间到下一个最早完成时间
+        if not scheduled_this_round and not completed_this_round:
+            # 找到下一个最早完成的任务
+            next_completion = float('inf')
+            for task_id in topological_order:
+                if task_id in task_finish_times and task_id not in completed_tasks:
+                    next_completion = min(next_completion, task_finish_times[task_id])
+
+            if next_completion != float('inf'):
+                current_time = next_completion
+            else:
+                current_time += 1.0  # 没有任务在运行，推进一小步
+        else:
+            # 有任务被调度或完成，保持当前时间继续检查
+            pass
+
+    # 计算最终makespan
+    makespan = max(task_finish_times.values()) if task_finish_times else 0.0
+
+    # 计算负载状态 - 基于硬件实际使用时间
+    for hw_idx in range(HARDWARE_NUM):
+        hw_total_time = 0.0
+        for task_info in hw_timelines[hw_idx]['tasks']:
+            hw_total_time += (task_info['finish_time'] - task_info['start_time'])
+
+        if makespan > 0:
+            current_load[hw_idx] = hw_total_time / makespan
+        else:
+            current_load[hw_idx] = 0.0
 
     return makespan, total_energy, task_finish_times
-
 
 def validate_dag_quality(dataset):
     """验证生成的DAG质量（增强版本）"""
@@ -605,6 +696,66 @@ def improved_evaluate_modrl(scheduler, dataset):
     }
 
 
+def execute_scheduling_with_details(dag, actions, current_load):
+    """执行调度并返回详细结果（支持并行执行）"""
+    task_ids = sorted(dag.task_nodes.keys())
+
+    # 使用改进的并行调度
+    makespan, total_energy, task_finish_times = improved_execute_scheduling(dag, actions, current_load)
+
+    # 构建详细调度信息
+    task_schedule = {}
+    hardware_usage = {i: {"tasks": [], "total_time": 0.0} for i in range(HARDWARE_NUM)}
+
+    # 重新计算任务调度详情
+    for task_id in task_ids:
+        task_idx = task_ids.index(task_id)
+        hw_idx = actions[task_idx] if task_idx < len(actions) else 0
+
+        # 硬件支持检查
+        if dag.comp_matrix[task_idx, hw_idx] == float('inf'):
+            valid_hw = [j for j in range(HARDWARE_NUM) if dag.comp_matrix[task_idx, j] != float('inf')]
+            hw_idx = valid_hw[0] if valid_hw else 0
+
+        exec_time = dag.comp_matrix[task_idx, hw_idx]
+
+        # 使用从并行调度中计算的时间
+        start_time = task_finish_times[task_id] - exec_time
+        finish_time = task_finish_times[task_id]
+
+        # 记录详细调度信息
+        task_schedule[task_id] = (hw_idx, start_time, finish_time)
+        hardware_usage[hw_idx]["tasks"].append({
+            "task_id": task_id,
+            "start": start_time,
+            "finish": finish_time,
+            "duration": exec_time
+        })
+        hardware_usage[hw_idx]["total_time"] += exec_time
+
+    # 计算截止时间满足率
+    deadline_met_count = 0
+    for task_id, finish_time in task_finish_times.items():
+        task = dag.task_nodes[task_id]
+        if finish_time <= task.deadline:
+            deadline_met_count += 1
+
+    deadline_satisfaction_rate = deadline_met_count / len(task_ids) if task_ids else 0
+
+    # 计算负载均衡（基于硬件完成时间的方差）
+    hw_finish_times = [hardware_usage[i]["total_time"] for i in range(HARDWARE_NUM)]
+    load_balance = np.var(hw_finish_times)
+
+    return {
+        "makespan": makespan,
+        "total_energy": total_energy,
+        "deadline_satisfaction_rate": deadline_satisfaction_rate,
+        "load_balance": load_balance,
+        "task_schedule": task_schedule,
+        "hardware_usage": hardware_usage,
+        "task_finish_times": task_finish_times
+    }
+
 def evaluate_baseline(algorithm, dataset):
     """评估基线算法"""
     metrics = {
@@ -642,10 +793,10 @@ def evaluate_baseline(algorithm, dataset):
 
 
 def visualize_stable_results(train_metrics, baseline_results, modrl_results):
-    """改进的可视化"""
+    """Improved visualization with English labels"""
     plt.figure(figsize=(20, 12))
 
-    # 1. 训练过程指标
+    # 1. Training process metrics
     plt.subplot(2, 4, 1)
     plt.plot(train_metrics["makespan"])
     plt.title("Training Makespan")
@@ -670,7 +821,7 @@ def visualize_stable_results(train_metrics, baseline_results, modrl_results):
     plt.xlabel("Episode")
     plt.ylabel("Epsilon")
 
-    # 2. 算法对比
+    # 2. Algorithm comparison
     plt.subplot(2, 4, 5)
     algorithms = list(baseline_results.keys()) + ["MODRL"]
     makespans = [baseline_results[algo]["makespan"] for algo in baseline_results] + [modrl_results["makespan"]]
@@ -694,7 +845,7 @@ def visualize_stable_results(train_metrics, baseline_results, modrl_results):
     plt.savefig("stable_experiment_results.png", dpi=300, bbox_inches='tight')
     plt.show()
 
-    # 输出详细结果
+    # Output detailed results
     print("\n=== Detailed Results Comparison ===")
     for algo in baseline_results:
         print(f"{algo}: Makespan={baseline_results[algo]['makespan']:.2f}, "
@@ -706,5 +857,82 @@ def visualize_stable_results(train_metrics, baseline_results, modrl_results):
           f"Deadline={modrl_results['deadline']:.2%}")
 
 
+def debug_single_dag_example():
+    """调试单个DAG例子"""
+    print("\n===== 调试单个DAG调度过程 =====")
+
+    # 生成数据集
+    dataset = EmbeddedDatasetGenerator.generate_dataset()
+
+    # 选择一个具体的DAG进行调试
+    task_type = "工业控制"
+    dag = dataset["split"][task_type][0]  # 选择第一个DAG
+
+    print(f"调试DAG {dag.dag_id} ({task_type}), 任务数: {len(dag.task_nodes)}")
+
+    # 初始化可视化器
+    visualizer = DetailedSchedulerVisualizer()
+
+    # 测试不同算法
+    algorithm_results = {}
+
+    # 1. 加载训练好的MODRL模型
+    print("加载MODRL模型...")
+    task_feat_dim = HARDWARE_NUM * 2 + 2
+    adj_dim = MAX_TASK_NUM
+    hardware_feat_dim = 4
+    modrl_scheduler = MODRLScheduler(task_feat_dim, adj_dim, hardware_feat_dim).to(DEVICE)
+
+    try:
+        modrl_scheduler.load_state_dict(torch.load('modrl_final.pth', map_location=DEVICE))
+        modrl_scheduler.eval()
+        print("MODRL模型加载成功")
+
+        # 2. MODRL调度
+        print("运行MODRL调度...")
+        task_feat, adj, seq_order, hardware_feat, load_states, history_resource = prepare_dag_input(dag)
+
+        with torch.no_grad():
+            q_values = modrl_scheduler(task_feat, adj, seq_order, hardware_feat, load_states, history_resource)
+            modrl_actions = torch.argmax(q_values, dim=-1).cpu().numpy()[0]
+
+        modrl_result = execute_scheduling_with_details(dag, modrl_actions, np.zeros(HARDWARE_NUM))
+        algorithm_results["MODRL"] = modrl_result
+
+    except FileNotFoundError:
+        print("未找到训练好的MODRL模型，请先运行训练")
+        return
+
+    # 3. 随机调度（作为基线）
+    print("运行随机调度...")
+    random_actions = np.random.randint(0, HARDWARE_NUM, len(dag.task_nodes))
+    random_result = execute_scheduling_with_details(dag, random_actions, np.zeros(HARDWARE_NUM))
+    algorithm_results["Random"] = random_result
+
+    # 可视化两种调度结果
+    for algo, result in algorithm_results.items():
+        visualizer.visualize_single_dag_schedule(dag, result, algo)
+
+    # 输出对比结果
+    print(f"\n=== DAG {dag.dag_id} 调度结果对比 ===")
+    for algo, result in algorithm_results.items():
+        print(f"{algo}:")
+        print(f"  - Makespan: {result['makespan']:.2f}ms")
+        print(f"  - 能耗: {result['total_energy']:.2f}J")
+        print(f"  - 截止时间满足率: {result['deadline_satisfaction_rate']:.2%}")
+        print(f"  - 负载均衡方差: {result['load_balance']:.4f}")
+
+        # 输出任务分配统计
+        hw_counts = {hw: 0 for hw in HARDWARE_TYPES}
+        for task_id, (hw_idx, start, finish) in result["task_schedule"].items():
+            hw_counts[HARDWARE_TYPES[hw_idx]] += 1
+        print(f"  - 任务分配: {hw_counts}")
+
+    # 算法对比可视化
+    visualizer.compare_algorithms_on_dag(dag, algorithm_results)
+
+# 在main()函数末尾调用
 if __name__ == "__main__":
     main()
+    debug_single_dag_example()  # 添加这行
+
