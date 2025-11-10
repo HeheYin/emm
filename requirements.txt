@@ -1,0 +1,11 @@
+# 核心深度学习与图神经网络库
+torch
+torch_geometric
+
+# 强化学习环境
+gymnasium
+
+# DAG处理与数据操作
+networkx
+numpy
+pandas
